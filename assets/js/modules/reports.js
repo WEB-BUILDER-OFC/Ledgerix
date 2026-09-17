@@ -21,11 +21,13 @@ export function generateReport() {
 
   State.setCurrentReportData({ type, fromDate, toDate, invoices: filtered });
 
-  // Show report area, hide empty state
-  const reportContent = document.getElementById('reportContent');
-  const reportEmpty   = document.getElementById('reportEmpty');
-  if (reportContent) reportContent.style.display = 'block';
-  if (reportEmpty)   reportEmpty.style.display   = 'none';
+  // Show report area and export bar, hide empty state
+  const reportContent   = document.getElementById('reportContent');
+  const reportEmpty     = document.getElementById('reportEmpty');
+  const reportExportBar = document.getElementById('reportExportBar');
+  if (reportContent)   reportContent.style.display   = 'block';
+  if (reportEmpty)     reportEmpty.style.display     = 'none';
+  if (reportExportBar) reportExportBar.style.display = 'flex';
 
   switch (type) {
     case 'daily':    renderDailyReport(filtered, fromDate, toDate);   break;

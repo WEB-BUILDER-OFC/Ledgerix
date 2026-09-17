@@ -147,3 +147,16 @@ export function validatePhone(phone) {
 export function csvField(v) {
   return '"' + String(v).replace(/"/g, '""') + '"';
 }
+
+// ── Current Indian Financial Year ─────────────────────────────────────────────
+// Returns FY string in "YYYY-YY" format.
+// Indian FY: April 1 – March 31.
+//   Jan–Mar  → previous calendar year is the FY start (e.g. 2027-01 → 2026-27)
+//   Apr–Dec  → current calendar year is the FY start  (e.g. 2026-09 → 2026-27)
+
+export function currentFY() {
+  const startStr = getYearStart(today()); // e.g. "2026-04-01"
+  const startYear = parseInt(startStr.substring(0, 4), 10);
+  const endYY = String(startYear + 1).slice(-2);
+  return startYear + '-' + endYY;
+}

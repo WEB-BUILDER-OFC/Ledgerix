@@ -7,7 +7,7 @@
 import * as State from '../core/state.js';
 import { saveProfile as _saveProfile } from '../core/storage.js';
 import { showToast } from '../ui/toast.js';
-import { validateGSTIN, validatePhone, esc } from '../utils/helpers.js';
+import { validateGSTIN, validatePhone, esc, currentFY } from '../utils/helpers.js';
 import { checkImageSize } from '../core/security.js';
 
 export function loadProfileForm() {
@@ -19,7 +19,7 @@ export function loadProfileForm() {
     profilePhone:   State.profile.phone   || '',
     profileEmail:   State.profile.email   || '',
     profilePrefix:  State.profile.prefix  || 'INV',
-    profileFY:      State.profile.fy      || '2025-26',
+    profileFY:      State.profile.fy      || currentFY(),
     profileBank:    State.profile.bank    || '',
     profileAccount: State.profile.account || '',
     profileIFSC:    State.profile.ifsc    || '',
@@ -109,4 +109,28 @@ export function handleSigUpload(e) {
     showToast('Signature uploaded!', 'success');
   };
   reader.readAsDataURL(file);
+}
+
+export async function clearProfile() {
+  // Reset in-memory state
+  State.setProfile({});
+
+  // Persist the cleared state through the existing encrypted storage path
+  await _saveProfile();
+
+  // Clear all profile form fields
+  ['profileName','profileGSTIN','profileAddr','profilePhone','profileEmail',
+   'profilePrefix','profileFY','profileBank','profileAccount','profileIFSC','profileUPI']
+    .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+
+  // Hide logo and signature previews
+  const lp = document.getElementById('logoPreview');
+  const sp = document.getElementById('sigPreview');
+  if (lp) lp.style.display = 'none';
+  if (sp) sp.style.display = 'none';
+
+  // Hide the profile banner in the invoice tab
+  loadProfileBanner();
+
+  showToast('Profile cleared', 'info');
 }

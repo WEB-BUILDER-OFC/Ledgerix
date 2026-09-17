@@ -23,7 +23,8 @@ import { renderProducts, addNewProduct, deleteProduct, addProductToInvoice,
 import { addNotification, updateNotificationBadge, renderNotifications,
          markRead, toggleNotifications, checkPaymentReminders } from './modules/notifications.js';
 import { saveProfile, loadProfileBanner, loadProfileForm,
-         handleLogoUpload, handleSigUpload }        from './modules/profile.js';
+         handleLogoUpload, handleSigUpload,
+         clearProfile }                             from './modules/profile.js';
 import { saveSettings, togglePIN, savePIN, removePINFromSettings } from './modules/settings.js';
 import { setGSTType, setQuickRate, calculateGST,
          clearCalculator, renderHistory, loadHistory, clearHistory } from './modules/gst.js';
@@ -56,7 +57,7 @@ window._ledgerix = {
               searchProducts, closeProductSearch, filterProductList },
   notifications: { addNotification, updateNotificationBadge, renderNotifications,
                    markRead, toggleNotifications, checkPaymentReminders },
-  profile:  { saveProfile, loadProfileBanner, loadProfileForm, handleLogoUpload, handleSigUpload },
+  profile:  { saveProfile, loadProfileBanner, loadProfileForm, handleLogoUpload, handleSigUpload, clearProfile },
   settings: { saveSettings, togglePIN, savePIN, removePINFromSettings },
   gst:      { setGSTType, setQuickRate, calculateGST, clearCalculator,
               renderHistory, loadHistory, clearHistory },
@@ -137,15 +138,7 @@ window.clearAllData          = clearAllData;
 window.generateInvoice       = previewInvoice;
 window.printInvoice          = function() { window.print(); };
 
-window.clearProfile          = function() {
-  ['profileName','profileGSTIN','profileAddr','profilePhone','profileEmail',
-   'profilePrefix','profileFY','profileBank','profileAccount','profileIFSC','profileUPI']
-    .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
-  const lp = document.getElementById('logoPreview');
-  const sp = document.getElementById('sigPreview');
-  if (lp) lp.style.display = 'none';
-  if (sp) sp.style.display = 'none';
-};
+window.clearProfile          = clearProfile;
 
 window.toggleGlobalSearch    = openGlobalSearch;
 

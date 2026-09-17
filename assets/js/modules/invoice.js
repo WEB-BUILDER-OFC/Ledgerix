@@ -10,7 +10,7 @@ import * as State from '../core/state.js';
 import { nextId } from '../core/state.js';
 import { saveInvoices, saveInvoiceCounter, clearDraft, saveDraft } from '../core/storage.js';
 import { showToast } from '../ui/toast.js';
-import { esc, formatMoney, today, addDays, numberToWords } from '../utils/helpers.js';
+import { esc, formatMoney, today, addDays, numberToWords, currentFY } from '../utils/helpers.js';
 
 let _autoSaveTimer = null;
 
@@ -120,7 +120,7 @@ export function autoSaveInvoice() {
 
 export function generateInvoiceNumber() {
   const prefix = State.profile.prefix || 'INV';
-  const fy     = State.profile.fy     || '2025-26';
+  const fy     = State.profile.fy     || currentFY();
   return `${prefix}/${fy}/${String(State.invoiceCounter).padStart(4, '0')}`;
 }
 
@@ -184,7 +184,7 @@ export async function saveInvoice() {
   State.savedInvoices.unshift(invoice);
   await saveInvoices();
 
-  State.invoiceCounter++;
+  State.setInvoiceCounter(State.invoiceCounter + 1);
   saveInvoiceCounter();          // centralised — no direct localStorage access
   clearTimeout(_autoSaveTimer);
   clearDraft();

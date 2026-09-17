@@ -18,7 +18,8 @@ export function updateDashboard() {
   const yStr = yesterday.toISOString().split('T')[0];
 
   let todaySales = 0, yesterdaySales = 0, monthSales = 0, lastMonthSales = 0;
-  let totalGST = 0, pendingAmount = 0, paidAmount = 0, totalAmount = 0;
+  let totalGST = 0, totalCGST = 0, totalSGST = 0, totalIGST = 0;
+  let pendingAmount = 0, paidAmount = 0, totalAmount = 0;
   let paidCount = 0, pendingCount = 0, overdueCount = 0, cancelledCount = 0;
   const recentInvoices = [];
   const pendingInvoices = [];
@@ -37,6 +38,12 @@ export function updateDashboard() {
     if (inv.invDate >= lms && inv.invDate <= lme) lastMonthSales += amt;
 
     totalGST += gst;
+    if ((inv.taxType || 'intra') === 'inter') {
+      totalIGST += gst;
+    } else {
+      totalCGST += gst / 2;
+      totalSGST += gst / 2;
+    }
 
     if (inv.paymentStatus === 'paid')      { paidAmount += amt; paidCount++; }
     if (inv.paymentStatus === 'pending')   { pendingAmount += amt; pendingCount++; }
@@ -62,9 +69,9 @@ export function updateDashboard() {
   setEl('dashPendingCount', `${pendingCount + overdueCount} invoices`);
   setEl('dashCollectionRate', collectionRate + '%');
   setEl('dashPaidAmount',   formatMoney(paidAmount));
-  setEl('dashCGST',         formatMoney(totalGST / 2));
-  setEl('dashSGST',         formatMoney(totalGST / 2));
-  setEl('dashIGST',         formatMoney(0));
+  setEl('dashCGST',         formatMoney(totalCGST));
+  setEl('dashSGST',         formatMoney(totalSGST));
+  setEl('dashIGST',         formatMoney(totalIGST));
   setEl('growthValue',      formatMoney(todaySales));
   setEl('growthPercent',    growthPercent + '%');
   setEl('growthSub',        growthPercent >= 0 ? '▲ vs yesterday' : '▼ vs yesterday');
@@ -186,10 +193,33 @@ export function updateDashboard() {
       </div>`).join('');
   }
 
-  renderDashboardCharts(paidAmount, pendingAmount, monthSales, lastMonthSales);
+  // Invoice Overview: center count + legend
+  const totalInvoiceCount = State.savedInvoices.length;
+  const unpaidCount = pendingCount + overdueCount;
+  const unpaidAmount = pendingAmount;
+
+  const puTotal = document.getElementById('paidUnpaidTotal');
+  if (puTotal) puTotal.textContent = totalInvoiceCount;
+
+  const puLegend = document.getElementById('paidUnpaidLegend');
+  if (puLegend) {
+    puLegend.innerHTML =
+      `<div class="legend-item">` +
+        `<span class="legend-dot" style="background:#4CAF50"></span>` +
+        `<span class="legend-label">Paid</span>` +
+        `<strong style="font-size:var(--f-xs);color:var(--c-text)">${formatMoney(paidAmount)} (${paidCount})</strong>` +
+      `</div>` +
+      `<div class="legend-item">` +
+        `<span class="legend-dot" style="background:#FF6B6B"></span>` +
+        `<span class="legend-label">Pending</span>` +
+        `<strong style="font-size:var(--f-xs);color:var(--c-text)">${formatMoney(unpaidAmount)} (${unpaidCount})</strong>` +
+      `</div>`;
+  }
+
+  renderDashboardCharts(paidAmount, pendingAmount, monthSales, lastMonthSales, totalCGST, totalSGST, totalIGST);
 }
 
-function renderDashboardCharts(paidAmount, pendingAmount, monthSales, lastMonthSales) {
+function renderDashboardCharts(paidAmount, pendingAmount, monthSales, lastMonthSales, totalCGST, totalSGST, totalIGST) {
   if (typeof Chart === 'undefined') return;
 
   // Paid/Unpaid doughnut
@@ -228,6 +258,22 @@ function renderDashboardCharts(paidAmount, pendingAmount, monthSales, lastMonthS
           y: { ticks: { color: '#c9c9c9' }, grid: { color: 'rgba(255,255,255,0.05)' } },
         },
       },
+    });
+  }
+
+  // GST Breakdown doughnut
+  const ctx3 = document.getElementById('gstChart');
+  if (ctx3) {
+    if (State.charts.gst) State.charts.gst.destroy();
+    State.charts.gst = new Chart(ctx3, {
+      type: 'doughnut',
+      data: {
+        labels: ['CGST', 'SGST', 'IGST'],
+        datasets: [{ data: [totalCGST, totalSGST, totalIGST],
+          backgroundColor: ['#4CAF50', '#2196F3', '#c9a84c'], borderWidth: 0 }],
+      },
+      options: { responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#c9c9c9', font: { size: 11 } } } } },
     });
   }
 }

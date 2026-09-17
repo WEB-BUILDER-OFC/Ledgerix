@@ -633,9 +633,14 @@
                             </select>
                         </div>
                     </div>
-                    <button class="btn btn-primary" onclick="calculateGST(true)" style="width:100%">
-                        <i class="fas fa-bolt"></i> Calculate & Save to History
-                    </button>
+                    <div style="display:flex;gap:0.5rem">
+                        <button class="btn btn-primary" onclick="calculateGST(true)" style="flex:1">
+                            <i class="fas fa-bolt"></i> Calculate & Save to History
+                        </button>
+                        <button class="btn btn-secondary" onclick="clearCalculator()" style="flex:0 0 auto" title="Clear">
+                            <i class="fas fa-times"></i> Clear
+                        </button>
+                    </div>
                     <div class="results-grid" id="calcResults" style="display:none">
                         <div class="result-box"><div class="result-label">Base Amount</div><div class="result-value" id="resBase">Rs0.00</div></div>
                         <div class="result-box" id="cgstBox"><div class="result-label">CGST</div><div class="result-value" id="resCGST">Rs0.00</div></div>
@@ -1000,15 +1005,15 @@
                         </div>
                     </div>
 
+                    <div id="reportExportBar" class="report-export-bar" style="display:none">
+                        <button class="btn btn-success btn-sm" onclick="exportReportPDF()"><i class="fas fa-file-pdf"></i> Export PDF</button>
+                        <button class="btn btn-teal btn-sm" onclick="exportReportExcel()"><i class="fas fa-file-excel"></i> Export Excel</button>
+                        <button class="btn btn-info btn-sm" onclick="exportReportCSV()"><i class="fas fa-file-csv"></i> Export CSV</button>
+                        <button class="btn btn-warning btn-sm" onclick="printReport()"><i class="fas fa-print"></i> Print</button>
+                    </div>
                     <div id="reportContent" style="display:none">
                         <div class="date-range-display" id="reportDateRange"></div>
                         <div class="report-summary" id="reportSummary"></div>
-                        <div class="report-export-bar">
-                            <button class="btn btn-success btn-sm" onclick="exportReportPDF()"><i class="fas fa-file-pdf"></i> Export PDF</button>
-                            <button class="btn btn-teal btn-sm" onclick="exportReportExcel()"><i class="fas fa-file-excel"></i> Export Excel</button>
-                            <button class="btn btn-info btn-sm" onclick="exportReportCSV()"><i class="fas fa-file-csv"></i> Export CSV</button>
-                            <button class="btn btn-warning btn-sm" onclick="printReport()"><i class="fas fa-print"></i> Print</button>
-                        </div>
                         <div style="overflow-x:auto">
                             <table class="report-table" id="reportTable">
                                 <thead id="reportTableHead"></thead>
@@ -1113,7 +1118,7 @@
                         </div>
                         <div class="form-group">
                             <label class="form-label">Financial Year</label>
-                            <input type="text" class="form-input" id="profileFY" placeholder="2026-27" value="2026-27">
+                            <input type="text" class="form-input" id="profileFY" placeholder="e.g. 2026-27">
                         </div>
                     </div>
                     <div class="form-row">
