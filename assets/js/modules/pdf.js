@@ -3,6 +3,8 @@
  * v2.6 fix: replaced doc.html() (requires missing html2canvas) with
  *           jsPDF + autoTable — reliable on mobile without extra dependencies.
  *           Preview uses style.display (not classList) to override inline display:none.
+ * v2.11: Professional PDF — logo, signature, watermark, improved layout.
+ *         HTML preview also updated: signature area improved, watermark added.
  */
 
 'use strict';
@@ -39,6 +41,44 @@ export async function downloadPDF() {
   await downloadPDFFromData(data);
 }
 
+// Detect image format from a base64 data URI
+function _imgFormat(dataUri) {
+  if (!dataUri) return null;
+  if (dataUri.startsWith('data:image/png'))  return 'PNG';
+  if (dataUri.startsWith('data:image/jpeg') || dataUri.startsWith('data:image/jpg')) return 'JPEG';
+  if (dataUri.startsWith('data:image/webp')) return 'WEBP';
+  if (dataUri.startsWith('data:image/gif'))  return 'GIF';
+  return 'PNG'; // safe fallback
+}
+
+// Safely add a logo/signature image to jsPDF
+// Returns true on success, false if image failed (broken/unsupported)
+function _addImg(doc, dataUri, x, y, maxW, maxH) {
+  if (!dataUri || !dataUri.startsWith('data:image/')) return false;
+  try {
+    const fmt = _imgFormat(dataUri);
+    // Create a temporary Image to get natural dimensions for aspect-ratio fit
+    // Since we're in a sync context, use a heuristic: place at maxW × maxH and let aspect ratio
+    // be preserved via width + height both being explicit (jsPDF stretches unless we compute)
+    // We'll use a safe fixed size approach — callers pass the intended display box
+    doc.addImage(dataUri, fmt, x, y, maxW, maxH);
+    return true;
+  } catch (e) {
+    console.warn('[PDF] Image embed failed:', e);
+    return false;
+  }
+}
+
+// Get natural aspect ratio of a base64 image (async, returns Promise<{w,h}>)
+function _getImgDims(dataUri) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload  = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+    img.onerror = () => resolve({ w: 1, h: 1 });
+    img.src = dataUri;
+  });
+}
+
 export async function downloadPDFFromData(data) {
   const jsPDFCtor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
   if (!jsPDFCtor) {
@@ -48,90 +88,196 @@ export async function downloadPDFFromData(data) {
   }
 
   try {
-    const doc     = new jsPDFCtor({ orientation: 'p', unit: 'mm', format: 'a4' });
-    const profile = State.profile || {};
-    const W       = 210; // A4 width mm
-    const margin  = 14;
-    let   y       = margin;
+    const profile  = State.profile || {};
+    const W        = 210;
+    const H        = 297;
+    const margin   = 14;
+    const innerW   = W - margin * 2;
+    const NAVY     = [10, 22, 40];
+    const GOLD     = [201, 168, 76];
+    const DARK     = [26, 34, 54];
+    const MID      = [80, 90, 110];
+    const LIGHT    = [230, 235, 242];
 
-    // ── Header ──
+    // Pre-load logo/signature dimensions for correct aspect ratio
+    let logoDims  = { w: 1, h: 1 };
+    let sigDims   = { w: 1, h: 1 };
+    if (profile.logo)      logoDims = await _getImgDims(profile.logo);
+    if (profile.signature) sigDims  = await _getImgDims(profile.signature);
+
+    const doc = new jsPDFCtor({ orientation: 'p', unit: 'mm', format: 'a4' });
+    let y = 0;
+
+    // ── Subtle side watermark (drawn first, behind everything) ────────────────
+    doc.saveGraphicsState();
+    doc.setTextColor(220, 224, 232);          // very light navy-tint gray
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'bold');
+    // Rotate 90°, positioned along the right edge at mid-page
+    doc.text('Ledgerix', W - 4, H / 2, { angle: 90, align: 'center' });
+    doc.restoreGraphicsState();
+
+    // ── Header band ───────────────────────────────────────────────────────────
+    // Full-width navy band at top
+    const bandH = profile.logo ? 32 : 24;
+    doc.setFillColor(...NAVY);
+    doc.rect(0, 0, W, bandH, 'F');
+
+    // Gold accent line under band
+    doc.setFillColor(...GOLD);
+    doc.rect(0, bandH, W, 0.8, 'F');
+
+    y = 6;
+
+    // Logo in header band (left side)
+    const LOGO_MAX_H = bandH - 8;   // 24px or 20px max
+    let logoW = 0;
+    if (profile.logo) {
+      const aspect = logoDims.w / Math.max(logoDims.h, 1);
+      const lh = Math.min(LOGO_MAX_H, 20);
+      const lw = Math.min(lh * aspect, 36);
+      const ok = _addImg(doc, profile.logo, margin, y, lw, lh);
+      if (ok) logoW = lw + 4;
+    }
+
+    // Business name + details in band (white text, after logo)
+    const nameX = margin + logoW;
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(12);
+    doc.setFont('helvetica', 'bold');
+    doc.text(profile.name || 'Your Business', nameX, y + 6);
+
+    doc.setFontSize(7);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(180, 190, 210);
+    let detY = y + 11;
+    if (profile.address) {
+      const addrLines = doc.splitTextToSize(profile.address, innerW - logoW - 60);
+      doc.text(addrLines, nameX, detY);
+      detY += addrLines.length * 3.5;
+    }
+    const gstPhone = [
+      profile.gstin ? 'GSTIN: ' + profile.gstin : '',
+      profile.phone ? profile.phone : '',
+    ].filter(Boolean).join('   |   ');
+    if (gstPhone) doc.text(gstPhone, nameX, detY);
+
+    // INVOICE title + meta (right of band)
+    const metaRX = W - margin;
+    doc.setTextColor(201, 168, 76);
     doc.setFontSize(18);
     doc.setFont('helvetica', 'bold');
-    doc.setTextColor(10, 22, 40);
-    doc.text(profile.name || 'Your Business', margin, y);
+    doc.text('INVOICE', metaRX, y + 6, { align: 'right' });
 
-    doc.setFontSize(22);
-    doc.setTextColor(201, 168, 76);
-    doc.text('INVOICE', W - margin, y, { align: 'right' });
-    y += 6;
-
-    doc.setFontSize(8);
-    doc.setTextColor(80, 80, 80);
-    doc.setFont('helvetica', 'normal');
-    if (profile.address) { doc.text(profile.address, margin, y); y += 4; }
-    if (profile.gstin)   doc.text('GSTIN: ' + profile.gstin, margin, y);
-    if (profile.phone)   doc.text(profile.phone, margin, y + 4);
-
-    // Invoice meta (right side)
-    const metaX = W - margin;
-    doc.setFontSize(8);
-    doc.text('Invoice #: ' + (data.invNum || ''), metaX, y,       { align: 'right' });
-    doc.text('Date:      ' + (data.invDate || ''), metaX, y + 4,  { align: 'right' });
-    doc.text('Due:       ' + (data.dueDate || ''), metaX, y + 8,  { align: 'right' });
-    doc.text('Status:    ' + (data.paymentStatus || '').toUpperCase(), metaX, y + 12, { align: 'right' });
-    y += 18;
-
-    // Divider
-    doc.setDrawColor(10, 22, 40);
-    doc.setLineWidth(0.5);
-    doc.line(margin, y, W - margin, y);
-    y += 5;
-
-    // ── Bill To ──
     doc.setFontSize(7);
-    doc.setTextColor(120, 120, 120);
-    doc.text('BILL TO', margin, y);
-    y += 4;
-    doc.setFontSize(9);
-    doc.setTextColor(10, 22, 40);
-    doc.setFont('helvetica', 'bold');
-    doc.text(data.clientName || '', margin, y);
-    y += 4;
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8);
-    doc.setTextColor(80, 80, 80);
-    if (data.clientAddr)  { doc.text(data.clientAddr,  margin, y); y += 4; }
-    if (data.clientGSTIN) { doc.text('GSTIN: ' + data.clientGSTIN, margin, y); y += 4; }
-    if (data.clientPhone) { doc.text(data.clientPhone, margin, y); y += 4; }
-    y += 2;
+    doc.setTextColor(180, 190, 210);
+    doc.text('#' + (data.invNum || ''), metaRX, y + 12, { align: 'right' });
 
-    // ── Items table ──
+    y = bandH + 8;  // below band + gold line
+
+    // ── Invoice meta row ──────────────────────────────────────────────────────
+    const metaItems = [
+      ['Date',   data.invDate     || '—'],
+      ['Due',    data.dueDate     || '—'],
+      ['Status', (data.paymentStatus || 'pending').toUpperCase()],
+    ];
+    const metaCellW = innerW / metaItems.length;
+    doc.setFillColor(...LIGHT);
+    doc.roundedRect(margin, y, innerW, 10, 1.5, 1.5, 'F');
+    metaItems.forEach(([lbl, val], i) => {
+      const cx = margin + i * metaCellW + metaCellW / 2;
+      doc.setFontSize(6);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(...MID);
+      doc.text(lbl.toUpperCase(), cx, y + 3.5, { align: 'center' });
+      doc.setFontSize(8);
+      doc.setFont('helvetica', 'bold');
+      // Status gets color coding
+      if (lbl === 'Status') {
+        doc.setTextColor(data.paymentStatus === 'paid' ? 0 : 150,
+                         data.paymentStatus === 'paid' ? 100 : 30,
+                         data.paymentStatus === 'paid' ? 60 : 30);
+      } else {
+        doc.setTextColor(...DARK);
+      }
+      doc.text(val, cx, y + 8, { align: 'center' });
+    });
+    y += 14;
+
+    // ── Bill To + Bank side-by-side ───────────────────────────────────────────
+    const colW = (innerW - 4) / 2;
+    const boxH = 28;
+
+    // Bill To box
+    doc.setFillColor(248, 250, 252);
+    doc.rect(margin, y, colW, boxH, 'F');
+    doc.setDrawColor(...LIGHT);
+    doc.setLineWidth(0.3);
+    doc.rect(margin, y, colW, boxH);
+    let bx = margin + 4, by = y + 5;
+    doc.setFontSize(6); doc.setFont('helvetica', 'bold'); doc.setTextColor(...GOLD);
+    doc.text('BILL TO', bx, by);
+    by += 4;
+    doc.setFontSize(9); doc.setFont('helvetica', 'bold'); doc.setTextColor(...DARK);
+    doc.text(data.clientName || '—', bx, by);
+    by += 4;
+    doc.setFontSize(7); doc.setFont('helvetica', 'normal'); doc.setTextColor(...MID);
+    if (data.clientAddr) {
+      const al = doc.splitTextToSize(data.clientAddr, colW - 8);
+      doc.text(al, bx, by); by += al.length * 3.5;
+    }
+    if (data.clientGSTIN) { doc.text('GSTIN: ' + data.clientGSTIN, bx, by); by += 3.5; }
+    if (data.clientPhone)  { doc.text(data.clientPhone, bx, by); }
+
+    // Bank Details box
+    const bkX = margin + colW + 4;
+    doc.setFillColor(248, 250, 252);
+    doc.rect(bkX, y, colW, boxH, 'F');
+    doc.setDrawColor(...LIGHT);
+    doc.rect(bkX, y, colW, boxH);
+    let bkbx = bkX + 4, bkby = y + 5;
+    doc.setFontSize(6); doc.setFont('helvetica', 'bold'); doc.setTextColor(...GOLD);
+    doc.text('PAYMENT DETAILS', bkbx, bkby);
+    bkby += 4;
+    doc.setFontSize(7); doc.setFont('helvetica', 'normal'); doc.setTextColor(...MID);
+    if (profile.bank)    { doc.text('Bank: '  + profile.bank,    bkbx, bkby); bkby += 4; }
+    if (profile.account) { doc.text('A/C: '   + profile.account, bkbx, bkby); bkby += 4; }
+    if (profile.ifsc)    { doc.text('IFSC: '  + profile.ifsc,    bkbx, bkby); bkby += 4; }
+    if (profile.upi)     { doc.text('UPI: '   + profile.upi,     bkbx, bkby); }
+    y += boxH + 6;
+
+    // ── Items table ───────────────────────────────────────────────────────────
     const tableRows = (data.itemRows || []).map((it, i) => {
-      const amount = parseFloat(it.amount || 0) || ((it.qty || 0) * (it.rate || 0)) * (1 - ((it.disc || 0) / 100));
-      const gstAmt = parseFloat(it.gstAmount || 0) || (amount * ((it.gst || 0) / 100));
+      const amt    = parseFloat(it.amount    || 0) || ((it.qty || 0) * (it.rate || 0)) * (1 - ((it.disc || 0) / 100));
+      const gstAmt = parseFloat(it.gstAmount || 0) || (amt * ((it.gst || 0) / 100));
       return [
         String(i + 1),
         it.desc || '',
-        it.hsn || '',
-        String(it.qty || 1),
+        it.hsn  || '',
+        String(it.qty  || 1),
         formatMoney(it.rate || 0),
-        (it.gst || 0) + '%',
+        (it.gst  || 0) + '%',
         (it.disc || 0) + '%',
         formatMoney(gstAmt),
-        formatMoney(amount + gstAmt),
+        formatMoney(amt + gstAmt),
       ];
     });
 
     doc.autoTable({
       startY: y,
-      head: [['#', 'Description', 'HSN', 'Qty', 'Rate', 'GST%', 'Disc%', 'Tax', 'Total']],
+      head: [['#', 'Description', 'HSN', 'Qty', 'Rate', 'GST%', 'Disc%', 'Tax Amt', 'Total']],
       body: tableRows.length ? tableRows : [['', 'No items', '', '', '', '', '', '', '']],
       theme: 'grid',
-      headStyles: { fillColor: [10, 22, 40], textColor: [201, 168, 76], fontSize: 7, fontStyle: 'bold' },
-      bodyStyles:  { fontSize: 7, textColor: [30, 30, 30] },
+      headStyles: {
+        fillColor: NAVY, textColor: GOLD,
+        fontSize: 7, fontStyle: 'bold', cellPadding: 3,
+      },
+      alternateRowStyles: { fillColor: [248, 250, 252] },
+      bodyStyles:  { fontSize: 7, textColor: [40, 50, 70], cellPadding: 3 },
       columnStyles: {
         0: { cellWidth: 8 },
-        1: { cellWidth: 45 },
+        1: { cellWidth: 47 },
         2: { cellWidth: 18 },
         3: { cellWidth: 10, halign: 'center' },
         4: { cellWidth: 22, halign: 'right' },
@@ -145,84 +291,147 @@ export async function downloadPDFFromData(data) {
 
     y = doc.lastAutoTable.finalY + 5;
 
-    // ── Totals ──
-    const totalsX   = W - margin - 60;
-    const valX      = W - margin;
-    const taxType   = data.taxType || 'intra';
-    const totalGST  = parseFloat(data.totalGST || 0);
-    const subtotal  = parseFloat(data.subtotal  || 0);
-    const grandTotal= parseFloat(data.grandTotal|| 0);
-    const shipping  = parseFloat(data.shipping  || 0);
-    const packaging = parseFloat(data.packaging || 0);
-    const handling  = parseFloat(data.handling  || 0);
+    // ── Totals block ──────────────────────────────────────────────────────────
+    const totW     = 75;
+    const totX     = W - margin - totW;
+    const taxType  = data.taxType || 'intra';
+    const totalGST = parseFloat(data.totalGST  || 0);
+    const subtotal = parseFloat(data.subtotal   || 0);
+    const grandTotal = parseFloat(data.grandTotal || 0);
+    const shipping   = parseFloat(data.shipping   || 0);
+    const packaging  = parseFloat(data.packaging  || 0);
+    const handling   = parseFloat(data.handling   || 0);
 
+    // Light background for totals
     const totLines = [
-      ['Subtotal', formatMoney(subtotal)],
+      ['Subtotal',   formatMoney(subtotal)],
       ...(taxType === 'inter'
         ? [['IGST', formatMoney(totalGST)]]
         : [['CGST', formatMoney(totalGST / 2)], ['SGST', formatMoney(totalGST / 2)]]),
-      ...(shipping  ? [['Shipping',  formatMoney(shipping)]]  : []),
-      ...(packaging ? [['Packaging', formatMoney(packaging)]] : []),
-      ...(handling  ? [['Handling',  formatMoney(handling)]]  : []),
+      ...(shipping   ? [['Shipping',  formatMoney(shipping)]]  : []),
+      ...(packaging  ? [['Packaging', formatMoney(packaging)]] : []),
+      ...(handling   ? [['Handling',  formatMoney(handling)]]  : []),
     ];
+    const totBlockH = totLines.length * 5.5 + 14;
+    doc.setFillColor(248, 250, 252);
+    doc.rect(totX - 4, y - 3, totW + 4, totBlockH, 'F');
+    doc.setDrawColor(...LIGHT);
+    doc.setLineWidth(0.3);
+    doc.rect(totX - 4, y - 3, totW + 4, totBlockH);
 
-    doc.setFontSize(8);
-    doc.setTextColor(80, 80, 80);
+    doc.setFontSize(7.5);
+    doc.setFont('helvetica', 'normal');
     totLines.forEach(([lbl, val]) => {
-      doc.text(lbl, totalsX, y, { align: 'left' });
-      doc.text(val, valX,    y, { align: 'right' });
-      y += 5;
+      doc.setTextColor(...MID);
+      doc.text(lbl, totX, y);
+      doc.setTextColor(...DARK);
+      doc.text(val, W - margin, y, { align: 'right' });
+      y += 5.5;
     });
 
-    doc.setLineWidth(0.4);
-    doc.setDrawColor(10, 22, 40);
-    doc.line(totalsX, y, valX, y);
+    // Divider before grand total
+    y += 1;
+    doc.setDrawColor(...NAVY);
+    doc.setLineWidth(0.6);
+    doc.line(totX - 4, y, W - margin, y);
     y += 4;
 
+    // Grand Total highlight
+    doc.setFillColor(...NAVY);
+    doc.rect(totX - 4, y - 4, totW + 4, 10, 'F');
     doc.setFontSize(10);
     doc.setFont('helvetica', 'bold');
-    doc.setTextColor(10, 22, 40);
-    doc.text('Grand Total', totalsX, y, { align: 'left' });
-    doc.setTextColor(201, 168, 76);
-    doc.text(formatMoney(grandTotal), valX, y, { align: 'right' });
-    y += 5;
+    doc.setTextColor(255, 255, 255);
+    doc.text('Grand Total', totX, y + 2.5);
+    doc.setTextColor(...GOLD);
+    doc.text(formatMoney(grandTotal), W - margin, y + 2.5, { align: 'right' });
+    y += 12;
 
+    // Amount in words
     doc.setFontSize(7);
     doc.setFont('helvetica', 'italic');
-    doc.setTextColor(120, 120, 120);
-    doc.text(numberToWords(Math.round(grandTotal)) + ' Rupees Only', valX, y, { align: 'right' });
+    doc.setTextColor(...MID);
+    doc.text(numberToWords(Math.round(grandTotal)) + ' Rupees Only',
+             W - margin, y, { align: 'right' });
     y += 8;
 
-    // ── Bank details ──
-    if (profile.bank || profile.upi) {
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(7);
-      doc.setTextColor(80, 80, 80);
-      if (profile.bank)    { doc.text('Bank: '  + profile.bank,    margin, y); y += 4; }
-      if (profile.account) { doc.text('A/C: '   + profile.account, margin, y); y += 4; }
-      if (profile.ifsc)    { doc.text('IFSC: '  + profile.ifsc,    margin, y); y += 4; }
-      if (profile.upi)     { doc.text('UPI: '   + profile.upi,     margin, y); y += 4; }
-    }
-
-    // ── Terms ──
-    if (data.terms) {
-      y += 3;
-      doc.setFontSize(7);
-      doc.setFont('helvetica', 'bold');
-      doc.text('Terms & Conditions:', margin, y);
+    // ── Terms + Notes ─────────────────────────────────────────────────────────
+    if (data.terms || data.notes) {
+      doc.setDrawColor(...LIGHT);
+      doc.setLineWidth(0.3);
+      doc.line(margin, y, W - margin, y);
       y += 4;
-      doc.setFont('helvetica', 'normal');
-      const termLines = doc.splitTextToSize(data.terms, W - margin * 2);
-      doc.text(termLines, margin, y);
-      y += termLines.length * 4;
+      if (data.terms) {
+        doc.setFontSize(7);
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(...DARK);
+        doc.text('Terms & Conditions:', margin, y);
+        y += 4;
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(...MID);
+        const tl = doc.splitTextToSize(data.terms, innerW);
+        doc.text(tl, margin, y);
+        y += tl.length * 4;
+      }
+      if (data.notes) {
+        y += 2;
+        doc.setFontSize(7);
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(...DARK);
+        doc.text('Notes:', margin, y);
+        y += 4;
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(...MID);
+        const nl = doc.splitTextToSize(data.notes, innerW);
+        doc.text(nl, margin, y);
+        y += nl.length * 4;
+      }
+      y += 4;
     }
 
-    // ── Footer ──
+    // ── Signature ─────────────────────────────────────────────────────────────
+    if (profile.signature) {
+      const SIG_MAX_H = 16;
+      const SIG_MAX_W = 48;
+      const aspect = sigDims.w / Math.max(sigDims.h, 1);
+      const sh = Math.min(SIG_MAX_H, SIG_MAX_H);
+      const sw = Math.min(sh * aspect, SIG_MAX_W);
+      const sigX = W - margin - sw;
+
+      // Check page space — add new page if needed
+      if (y + sh + 12 > H - 16) {
+        doc.addPage();
+        y = margin;
+      }
+
+      const sigOk = _addImg(doc, profile.signature, sigX, y, sw, sh);
+      if (sigOk) {
+        doc.setLineWidth(0.3);
+        doc.setDrawColor(...LIGHT);
+        doc.line(sigX - 4, y + sh + 2, W - margin, y + sh + 2);
+        doc.setFontSize(7);
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(...MID);
+        doc.text('Authorised Signature', W - margin, y + sh + 6, { align: 'right' });
+        if (profile.name) doc.text(profile.name, W - margin, y + sh + 10, { align: 'right' });
+        y += sh + 14;
+      }
+    }
+
+    // ── Footer ────────────────────────────────────────────────────────────────
     const pageH = doc.internal.pageSize.height;
+    doc.setFillColor(...NAVY);
+    doc.rect(0, pageH - 12, W, 12, 'F');
     doc.setFontSize(7);
-    doc.setTextColor(150, 150, 150);
-    doc.text('This is a computer-generated invoice. Thank you for your business!',
-             W / 2, pageH - 10, { align: 'center' });
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(180, 190, 210);
+    doc.text('This is a computer-generated invoice. Thank you for your business.',
+             W / 2, pageH - 5.5, { align: 'center' });
+    // Footer watermark label
+    doc.setTextColor(...GOLD);
+    doc.setFontSize(6.5);
+    doc.setFont('helvetica', 'bold');
+    doc.text('Ledgerix', W - margin, pageH - 5.5, { align: 'right' });
 
     doc.save((data.invNum || 'invoice') + '.pdf');
     showToast('PDF downloaded!', 'success');
@@ -238,97 +447,160 @@ export async function downloadPDFFromData(data) {
 // ── Invoice HTML for browser preview ─────────────────────────────────────────
 
 export function generateInvoiceHTML(data) {
-  const profile = State.profile || {};
-  const taxType = data.taxType || 'intra';
+  const profile  = State.profile || {};
+  const taxType  = data.taxType || 'intra';
   const totalGST = parseFloat(data.totalGST || 0);
 
   const itemsHTML = (data.itemRows || []).map((it, i) => {
     const amount = parseFloat(it.amount || 0) || ((it.qty || 0) * (it.rate || 0)) * (1 - ((it.disc || 0) / 100));
     const gstAmt = parseFloat(it.gstAmount || 0) || (amount * ((it.gst || 0) / 100));
-    return `<tr style="border-bottom:1px solid #e8ecf1">
-      <td style="padding:6px 5px;font-size:12px">${i+1}</td>
-      <td style="padding:6px 5px;font-size:12px">${esc(it.desc||'Item')}</td>
-      <td style="padding:6px 5px;font-size:12px">${esc(it.hsn||'—')}</td>
-      <td style="padding:6px 5px;font-size:12px;text-align:center">${it.qty||1}</td>
-      <td style="padding:6px 5px;font-size:12px;text-align:right">${formatMoney(it.rate||0)}</td>
-      <td style="padding:6px 5px;font-size:12px;text-align:center">${it.gst||0}%</td>
-      <td style="padding:6px 5px;font-size:12px;text-align:center">${it.disc||0}%</td>
-      <td style="padding:6px 5px;font-size:12px;text-align:right">${formatMoney(gstAmt)}</td>
-      <td style="padding:6px 5px;font-size:12px;text-align:right;font-weight:600">${formatMoney(amount+gstAmt)}</td>
+    return `<tr style="background:${i%2?'#f8fafc':'#fff'}">
+      <td style="padding:7px 6px;font-size:12px;color:#556">${i+1}</td>
+      <td style="padding:7px 6px;font-size:12px;color:#1a2236;font-weight:500">${esc(it.desc||'Item')}</td>
+      <td style="padding:7px 6px;font-size:11px;color:#778">${esc(it.hsn||'—')}</td>
+      <td style="padding:7px 6px;font-size:12px;text-align:center;color:#334">${it.qty||1}</td>
+      <td style="padding:7px 6px;font-size:12px;text-align:right;color:#334">${formatMoney(it.rate||0)}</td>
+      <td style="padding:7px 6px;font-size:11px;text-align:center;color:#778">${it.gst||0}%</td>
+      <td style="padding:7px 6px;font-size:11px;text-align:center;color:#778">${it.disc||0}%</td>
+      <td style="padding:7px 6px;font-size:12px;text-align:right;color:#445">${formatMoney(gstAmt)}</td>
+      <td style="padding:7px 6px;font-size:12px;text-align:right;font-weight:700;color:#1a2236">${formatMoney(amount+gstAmt)}</td>
     </tr>`;
   }).join('');
 
   const gstBlock = taxType === 'inter'
-    ? `<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:12px"><span style="color:#666">IGST</span><span>${formatMoney(totalGST)}</span></div>`
-    : `<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:12px"><span style="color:#666">CGST</span><span>${formatMoney(totalGST/2)}</span></div>
-       <div style="display:flex;justify-content:space-between;padding:3px 0;font-size:12px"><span style="color:#666">SGST</span><span>${formatMoney(totalGST/2)}</span></div>`;
+    ? `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px;color:#556"><span>IGST</span><span>${formatMoney(totalGST)}</span></div>`
+    : `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px;color:#556"><span>CGST</span><span>${formatMoney(totalGST/2)}</span></div>
+       <div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px;color:#556"><span>SGST</span><span>${formatMoney(totalGST/2)}</span></div>`;
 
-  return `<div style="font-family:Arial,sans-serif;max-width:780px;margin:0 auto;background:#fff;padding:24px;color:#1a2236">
-  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;padding-bottom:14px;border-bottom:2px solid #0a1628">
+  const statusColor = data.paymentStatus === 'paid'
+    ? 'background:#d1fae5;color:#065f46'
+    : data.paymentStatus === 'overdue'
+      ? 'background:#fee2e2;color:#991b1b'
+      : 'background:#fef3c7;color:#92400e';
+
+  const logoHTML = profile.logo
+    ? `<img src="${profile.logo}" style="max-height:48px;max-width:120px;object-fit:contain;display:block;margin-bottom:6px" alt="logo">`
+    : '';
+  const sigHTML = profile.signature
+    ? `<div style="margin-top:24px;text-align:right">
+        <img src="${profile.signature}" style="max-height:52px;max-width:140px;object-fit:contain;display:block;margin-left:auto" alt="signature">
+        <div style="border-top:1px solid #d1d9e6;margin-top:6px;padding-top:4px">
+          <p style="font-size:11px;color:#778;margin:0">Authorised Signature</p>
+          ${profile.name ? `<p style="font-size:11px;color:#334;margin:2px 0 0 0;font-weight:600">${esc(profile.name)}</p>` : ''}
+        </div>
+       </div>`
+    : '';
+
+  return `<div style="font-family:Arial,sans-serif;max-width:800px;margin:0 auto;background:#fff;color:#1a2236;position:relative;overflow:hidden">
+
+  <!-- Subtle watermark -->
+  <div style="position:absolute;right:-18px;top:50%;transform:translateY(-50%) rotate(90deg);font-size:11px;font-weight:700;color:#e8edf5;letter-spacing:3px;pointer-events:none;user-select:none;white-space:nowrap">Ledgerix</div>
+
+  <!-- Header band -->
+  <div style="background:#0a1628;padding:18px 24px 14px;display:flex;justify-content:space-between;align-items:flex-start">
     <div>
-      ${profile.logo?`<img src="${profile.logo}" style="height:48px;object-fit:contain;margin-bottom:6px;display:block">`:''}
-      <div style="font-size:18px;font-weight:700;color:#0a1628">${esc(profile.name||'Your Business')}</div>
-      <p style="color:#555;font-size:11px;margin-top:2px">${esc(profile.address||'')}</p>
-      <p style="color:#555;font-size:11px">GSTIN: ${esc(profile.gstin||'N/A')} | ${esc(profile.phone||'')}</p>
+      ${logoHTML}
+      <div style="font-size:16px;font-weight:700;color:#fff">${esc(profile.name||'Your Business')}</div>
+      <div style="color:#99a8c0;font-size:10px;margin-top:3px">${esc(profile.address||'')}</div>
+      <div style="color:#99a8c0;font-size:10px;margin-top:2px">
+        ${profile.gstin ? `GSTIN: ${esc(profile.gstin)}` : ''}
+        ${profile.gstin && profile.phone ? '&nbsp;|&nbsp;' : ''}
+        ${profile.phone ? esc(profile.phone) : ''}
+      </div>
     </div>
     <div style="text-align:right">
-      <div style="font-size:24px;font-weight:800;color:#0a1628;letter-spacing:2px">INVOICE</div>
-      <p style="color:#555;font-size:11px;margin-top:4px"><strong>${esc(data.invNum||'')}</strong></p>
-      <p style="color:#555;font-size:11px">Date: ${esc(data.invDate||'')} | Due: ${esc(data.dueDate||'')}</p>
-      <span style="display:inline-block;padding:2px 10px;border-radius:3px;font-size:10px;font-weight:700;margin-top:4px;
-        background:${data.paymentStatus==='paid'?'#d1fae5':'#fee2e2'};color:${data.paymentStatus==='paid'?'#065f46':'#991b1b'}">
-        ${(data.paymentStatus||'PENDING').toUpperCase()}</span>
+      <div style="font-size:22px;font-weight:800;color:#c9a84c;letter-spacing:3px">INVOICE</div>
+      <div style="color:#c9a84c;font-size:11px;font-weight:700;margin-top:3px">${esc(data.invNum||'')}</div>
     </div>
   </div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">
-    <div style="background:#f8fafc;padding:12px;border-radius:5px">
-      <p style="color:#8892a8;font-size:9px;text-transform:uppercase;margin-bottom:4px">Bill To</p>
-      <p style="font-weight:700;color:#1a2236;font-size:13px">${esc(data.clientName||'')}</p>
-      <p style="font-size:11px;color:#555">${esc(data.clientAddr||'')}</p>
-      <p style="font-size:11px;color:#555">GSTIN: ${esc(data.clientGSTIN||'N/A')}</p>
-      <p style="font-size:11px;color:#555">${esc(data.clientPhone||'')} ${data.clientEmail?'| '+esc(data.clientEmail):''}</p>
+  <!-- Gold rule -->
+  <div style="height:3px;background:#c9a84c"></div>
+
+  <!-- Meta row -->
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;background:#f0f4f9;border-bottom:1px solid #dde3ed">
+    ${[['DATE', data.invDate||'—'],['DUE DATE', data.dueDate||'—'],['STATUS', (data.paymentStatus||'PENDING').toUpperCase()]].map(([l,v],i)=>`
+    <div style="padding:8px 14px;${i<2?'border-right:1px solid #dde3ed':''}">
+      <div style="font-size:8px;color:#8892a8;font-weight:700;letter-spacing:0.8px">${l}</div>
+      <div style="font-size:12px;font-weight:700;color:#1a2236;margin-top:2px">${l==='STATUS'?`<span style="display:inline-block;padding:1px 8px;border-radius:3px;font-size:10px;${statusColor}">${v}</span>`:v}</div>
+    </div>`).join('')}
+  </div>
+
+  <!-- Bill To + Bank -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid #e8edf5">
+    <div style="padding:14px 14px 14px 24px;border-right:1px solid #e8edf5">
+      <div style="font-size:8px;font-weight:700;color:#c9a84c;letter-spacing:1px;margin-bottom:5px">BILL TO</div>
+      <div style="font-size:14px;font-weight:700;color:#1a2236">${esc(data.clientName||'')}</div>
+      <div style="font-size:11px;color:#556;margin-top:3px">${esc(data.clientAddr||'')}</div>
+      ${data.clientGSTIN?`<div style="font-size:11px;color:#778;margin-top:2px">GSTIN: ${esc(data.clientGSTIN)}</div>`:''}
+      ${data.clientPhone?`<div style="font-size:11px;color:#778;margin-top:2px">${esc(data.clientPhone)}</div>`:''}
+      ${data.clientEmail?`<div style="font-size:11px;color:#778">${esc(data.clientEmail)}</div>`:''}
     </div>
-    <div style="background:#f8fafc;padding:12px;border-radius:5px">
-      <p style="color:#8892a8;font-size:9px;text-transform:uppercase;margin-bottom:4px">Bank Details</p>
-      <p style="font-size:11px;color:#555">${esc(profile.bank||'N/A')}</p>
-      <p style="font-size:11px;color:#555">A/C: ${esc(profile.account||'N/A')} | IFSC: ${esc(profile.ifsc||'N/A')}</p>
-      <p style="font-size:11px;color:#555">UPI: ${esc(profile.upi||'N/A')}</p>
-      ${data.paymentMethod?`<p style="font-size:11px;color:#555;margin-top:4px">Via: ${esc(data.paymentMethod)}</p>`:''}
+    <div style="padding:14px 24px 14px 14px">
+      <div style="font-size:8px;font-weight:700;color:#c9a84c;letter-spacing:1px;margin-bottom:5px">PAYMENT DETAILS</div>
+      ${profile.bank    ?`<div style="font-size:11px;color:#556"><strong style="color:#334">Bank:</strong> ${esc(profile.bank)}</div>`:''}
+      ${profile.account ?`<div style="font-size:11px;color:#556"><strong style="color:#334">A/C:</strong> ${esc(profile.account)}</div>`:''}
+      ${profile.ifsc    ?`<div style="font-size:11px;color:#556"><strong style="color:#334">IFSC:</strong> ${esc(profile.ifsc)}</div>`:''}
+      ${profile.upi     ?`<div style="font-size:11px;color:#556"><strong style="color:#334">UPI:</strong> ${esc(profile.upi)}</div>`:''}
     </div>
   </div>
-  <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
-    <thead><tr style="background:#0a1628;color:#c9a84c">
-      <th style="padding:7px 5px;text-align:left;font-size:10px">#</th>
-      <th style="padding:7px 5px;text-align:left;font-size:10px">Description</th>
-      <th style="padding:7px 5px;text-align:left;font-size:10px">HSN</th>
-      <th style="padding:7px 5px;text-align:center;font-size:10px">Qty</th>
-      <th style="padding:7px 5px;text-align:right;font-size:10px">Rate</th>
-      <th style="padding:7px 5px;text-align:center;font-size:10px">GST%</th>
-      <th style="padding:7px 5px;text-align:center;font-size:10px">Disc%</th>
-      <th style="padding:7px 5px;text-align:right;font-size:10px">Tax</th>
-      <th style="padding:7px 5px;text-align:right;font-size:10px">Total</th>
-    </tr></thead>
-    <tbody>${itemsHTML||'<tr><td colspan="9" style="text-align:center;padding:14px;color:#888">No items</td></tr>'}</tbody>
-  </table>
-  <div style="display:flex;justify-content:flex-end;margin-bottom:16px">
-    <div style="width:240px">
-      <div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #e8ecf1;font-size:12px">
-        <span style="color:#666">Subtotal</span><span>${formatMoney(data.subtotal||0)}</span>
+
+  <!-- Items table -->
+  <div style="overflow-x:auto;margin:0">
+    <table style="width:100%;border-collapse:collapse;min-width:560px">
+      <thead>
+        <tr style="background:#0a1628;color:#c9a84c">
+          <th style="padding:8px 6px;text-align:left;font-size:10px;white-space:nowrap">#</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px">Description</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px">HSN</th>
+          <th style="padding:8px 6px;text-align:center;font-size:10px">Qty</th>
+          <th style="padding:8px 6px;text-align:right;font-size:10px">Rate</th>
+          <th style="padding:8px 6px;text-align:center;font-size:10px">GST%</th>
+          <th style="padding:8px 6px;text-align:center;font-size:10px">Disc%</th>
+          <th style="padding:8px 6px;text-align:right;font-size:10px">Tax</th>
+          <th style="padding:8px 6px;text-align:right;font-size:10px">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${itemsHTML||'<tr><td colspan="9" style="text-align:center;padding:16px;color:#888;font-size:12px">No items</td></tr>'}
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Totals -->
+  <div style="display:flex;justify-content:flex-end;padding:16px 24px;border-top:1px solid #e8edf5">
+    <div style="width:260px">
+      <div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px;color:#556;border-bottom:1px solid #eef0f5">
+        <span>Subtotal</span><span style="color:#1a2236">${formatMoney(data.subtotal||0)}</span>
       </div>
       ${gstBlock}
-      ${parseFloat(data.shipping) ?`<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:12px"><span style="color:#666">Shipping</span><span>${formatMoney(data.shipping)}</span></div>`:''}
-      ${parseFloat(data.packaging)?`<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:12px"><span style="color:#666">Packaging</span><span>${formatMoney(data.packaging)}</span></div>`:''}
-      ${parseFloat(data.handling) ?`<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:12px"><span style="color:#666">Handling</span><span>${formatMoney(data.handling)}</span></div>`:''}
-      <div style="display:flex;justify-content:space-between;padding:6px 0;border-top:2px solid #0a1628;font-weight:700;font-size:14px;color:#0a1628">
-        <span>Grand Total</span><span>${formatMoney(data.grandTotal||0)}</span>
+      ${parseFloat(data.shipping) ?`<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px;color:#556"><span>Shipping</span><span>${formatMoney(data.shipping)}</span></div>`:''}
+      ${parseFloat(data.packaging)?`<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px;color:#556"><span>Packaging</span><span>${formatMoney(data.packaging)}</span></div>`:''}
+      ${parseFloat(data.handling) ?`<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px;color:#556"><span>Handling</span><span>${formatMoney(data.handling)}</span></div>`:''}
+      <div style="display:flex;justify-content:space-between;padding:10px 14px;margin-top:4px;background:#0a1628;border-radius:4px">
+        <span style="font-size:13px;font-weight:700;color:#fff">Grand Total</span>
+        <span style="font-size:14px;font-weight:800;color:#c9a84c">${formatMoney(data.grandTotal||0)}</span>
       </div>
-      <div style="font-size:10px;color:#666;font-style:italic">${esc(numberToWords(Math.round(parseFloat(data.grandTotal)||0)))} Rupees Only</div>
+      <div style="font-size:10px;color:#778;font-style:italic;text-align:right;margin-top:5px;padding-right:2px">${esc(numberToWords(Math.round(parseFloat(data.grandTotal)||0)))} Rupees Only</div>
     </div>
   </div>
-  ${data.terms?`<div style="margin-top:12px;padding-top:10px;border-top:1px solid #e8ecf1"><p style="font-size:10px;color:#666"><strong>Terms:</strong> ${esc(data.terms)}</p></div>`:''}
-  ${data.notes?`<div style="margin-top:8px"><p style="font-size:10px;color:#666"><strong>Notes:</strong> ${esc(data.notes)}</p></div>`:''}
-  ${profile.signature?`<div style="margin-top:20px;text-align:right"><img src="${profile.signature}" style="height:48px;object-fit:contain"><p style="font-size:10px;color:#666">Authorised Signature</p></div>`:''}
-  <div style="margin-top:16px;text-align:center;color:#8892a8;font-size:9px;border-top:1px solid #e8ecf1;padding-top:10px">This is a computer-generated invoice.</div>
+
+  ${data.terms||data.notes ? `
+  <div style="padding:14px 24px;border-top:1px solid #e8edf5;background:#f8fafc">
+    ${data.terms?`<p style="font-size:10px;color:#556;margin:0 0 4px"><strong style="color:#334">Terms:</strong> ${esc(data.terms)}</p>`:''}
+    ${data.notes?`<p style="font-size:10px;color:#556;margin:0"><strong style="color:#334">Notes:</strong> ${esc(data.notes)}</p>`:''}
+  </div>`:''}
+
+  <!-- Signature -->
+  <div style="padding:0 24px 16px">
+    ${sigHTML}
+  </div>
+
+  <!-- Footer -->
+  <div style="background:#0a1628;padding:10px 24px;display:flex;justify-content:space-between;align-items:center">
+    <div style="font-size:10px;color:#6b7fa0">This is a computer-generated invoice.</div>
+    <div style="font-size:10px;font-weight:700;color:#c9a84c;letter-spacing:1px">Ledgerix</div>
+  </div>
+
 </div>`;
 }
 
