@@ -42,41 +42,69 @@ export async function downloadPDF() {
 }
 
 // Detect image format from a base64 data URI
-function _imgFormat(dataUri) {
-  if (!dataUri) return null;
-  if (dataUri.startsWith('data:image/png'))  return 'PNG';
-  if (dataUri.startsWith('data:image/jpeg') || dataUri.startsWith('data:image/jpg')) return 'JPEG';
-  if (dataUri.startsWith('data:image/webp')) return 'WEBP';
-  if (dataUri.startsWith('data:image/gif'))  return 'GIF';
-  return 'PNG'; // safe fallback
+// Load an image from a data URI and return { img, w, h }.
+// Always resolves — returns { img:null, w:1, h:1 } on error.
+// The loaded Image element is reused for canvas conversion, avoiding a second decode.
+function _loadImg(dataUri) {
+  return new Promise(resolve => {
+    if (!dataUri || !dataUri.startsWith('data:image/')) {
+      resolve({ img: null, w: 1, h: 1 });
+      return;
+    }
+    const img = new Image();
+    img.onload  = () => resolve({ img, w: img.naturalWidth, h: img.naturalHeight });
+    img.onerror = () => { console.warn('[PDF] Image load failed'); resolve({ img: null, w: 1, h: 1 }); };
+    img.src = dataUri;
+  });
 }
 
-// Safely add a logo/signature image to jsPDF
-// Returns true on success, false if image failed (broken/unsupported)
-function _addImg(doc, dataUri, x, y, maxW, maxH) {
-  if (!dataUri || !dataUri.startsWith('data:image/')) return false;
+// Normalise a loaded Image to a jsPDF-safe PNG data URI.
+// - PNG and JPEG are passed directly (already supported by jsPDF 2.5.1).
+// - WEBP, GIF, and any other format are drawn onto an off-screen canvas
+//   and exported as PNG — avoiding jsPDF's lack of native WEBP support
+//   (critical on Android where camera images are typically WEBP).
+// Returns { dataUri: string, format: 'PNG'|'JPEG' } or null on failure.
+function _normaliseImg(loadedImg, originalUri) {
+  if (!loadedImg) return null;
   try {
-    const fmt = _imgFormat(dataUri);
-    // Create a temporary Image to get natural dimensions for aspect-ratio fit
-    // Since we're in a sync context, use a heuristic: place at maxW × maxH and let aspect ratio
-    // be preserved via width + height both being explicit (jsPDF stretches unless we compute)
-    // We'll use a safe fixed size approach — callers pass the intended display box
-    doc.addImage(dataUri, fmt, x, y, maxW, maxH);
-    return true;
+    const isPNG  = originalUri.startsWith('data:image/png');
+    const isJPEG = originalUri.startsWith('data:image/jpeg') || originalUri.startsWith('data:image/jpg');
+    if (isPNG)  return { dataUri: originalUri, format: 'PNG'  };
+    if (isJPEG) return { dataUri: originalUri, format: 'JPEG' };
+
+    // For WEBP, GIF, or anything else: convert via canvas → PNG
+    const canvas = document.createElement('canvas');
+    canvas.width  = loadedImg.naturalWidth  || 1;
+    canvas.height = loadedImg.naturalHeight || 1;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(loadedImg, 0, 0);
+    const pngUri = canvas.toDataURL('image/png');
+    return { dataUri: pngUri, format: 'PNG' };
   } catch (e) {
-    console.warn('[PDF] Image embed failed:', e);
-    return false;
+    console.warn('[PDF] Image normalisation failed:', e);
+    return null;
   }
 }
 
-// Get natural aspect ratio of a base64 image (async, returns Promise<{w,h}>)
-function _getImgDims(dataUri) {
-  return new Promise(resolve => {
-    const img = new Image();
-    img.onload  = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
-    img.onerror = () => resolve({ w: 1, h: 1 });
-    img.src = dataUri;
-  });
+// Embed a pre-loaded, pre-normalised image into the jsPDF document.
+// loadedObj = result of _loadImg(); normalised = result of _normaliseImg().
+// Aspect ratio is computed from the loaded image's natural dimensions.
+// Returns true on success, false on any failure (never throws).
+function _addImg(doc, normalised, loadedObj, x, y, maxW, maxH) {
+  if (!normalised || !normalised.dataUri) return false;
+  try {
+    const { w, h } = loadedObj;
+    const aspect = w / Math.max(h, 1);
+    // Fit inside the bounding box (maxW × maxH) without distortion
+    let dw = maxW;
+    let dh = dw / aspect;
+    if (dh > maxH) { dh = maxH; dw = dh * aspect; }
+    doc.addImage(normalised.dataUri, normalised.format, x, y, dw, dh);
+    return true;
+  } catch (e) {
+    console.warn('[PDF] addImage failed:', e);
+    return false;
+  }
 }
 
 export async function downloadPDFFromData(data) {
@@ -99,11 +127,19 @@ export async function downloadPDFFromData(data) {
     const MID      = [80, 90, 110];
     const LIGHT    = [230, 235, 242];
 
-    // Pre-load logo/signature dimensions for correct aspect ratio
-    let logoDims  = { w: 1, h: 1 };
-    let sigDims   = { w: 1, h: 1 };
-    if (profile.logo)      logoDims = await _getImgDims(profile.logo);
-    if (profile.signature) sigDims  = await _getImgDims(profile.signature);
+    // Pre-load logo/signature — fully awaited before doc creation (no race possible)
+    let logoLoaded = { img: null, w: 1, h: 1 };
+    let logoNorm   = null;
+    let sigLoaded  = { img: null, w: 1, h: 1 };
+    let sigNorm    = null;
+    if (profile.logo) {
+      logoLoaded = await _loadImg(profile.logo);
+      logoNorm   = _normaliseImg(logoLoaded.img, profile.logo);
+    }
+    if (profile.signature) {
+      sigLoaded = await _loadImg(profile.signature);
+      sigNorm   = _normaliseImg(sigLoaded.img, profile.signature);
+    }
 
     const doc = new jsPDFCtor({ orientation: 'p', unit: 'mm', format: 'a4' });
     let y = 0;
@@ -130,14 +166,17 @@ export async function downloadPDFFromData(data) {
     y = 6;
 
     // Logo in header band (left side)
-    const LOGO_MAX_H = bandH - 8;   // 24px or 20px max
+    const LOGO_MAX_H = bandH - 8;   // 24mm or 20mm max
     let logoW = 0;
-    if (profile.logo) {
-      const aspect = logoDims.w / Math.max(logoDims.h, 1);
-      const lh = Math.min(LOGO_MAX_H, 20);
-      const lw = Math.min(lh * aspect, 36);
-      const ok = _addImg(doc, profile.logo, margin, y, lw, lh);
-      if (ok) logoW = lw + 4;
+    if (logoNorm) {
+      const ok = _addImg(doc, logoNorm, logoLoaded, margin, y, 36, LOGO_MAX_H);
+      if (ok) {
+        // Compute the actual drawn width from the normalised aspect ratio
+        const aspect = logoLoaded.w / Math.max(logoLoaded.h, 1);
+        const drawnH = Math.min(LOGO_MAX_H, logoLoaded.h > 0 ? LOGO_MAX_H : 20);
+        const drawnW = Math.min(drawnH * aspect, 36);
+        logoW = drawnW + 4;
+      }
     }
 
     // Business name + details in band (white text, after logo)
@@ -390,11 +429,12 @@ export async function downloadPDFFromData(data) {
     }
 
     // ── Signature ─────────────────────────────────────────────────────────────
-    if (profile.signature) {
+    if (sigNorm) {
       const SIG_MAX_H = 16;
       const SIG_MAX_W = 48;
-      const aspect = sigDims.w / Math.max(sigDims.h, 1);
-      const sh = Math.min(SIG_MAX_H, SIG_MAX_H);
+      // Compute display dimensions for positioning (aspect ratio computed inside _addImg)
+      const aspect = sigLoaded.w / Math.max(sigLoaded.h, 1);
+      const sh = SIG_MAX_H;
       const sw = Math.min(sh * aspect, SIG_MAX_W);
       const sigX = W - margin - sw;
 
@@ -404,7 +444,7 @@ export async function downloadPDFFromData(data) {
         y = margin;
       }
 
-      const sigOk = _addImg(doc, profile.signature, sigX, y, sw, sh);
+      const sigOk = _addImg(doc, sigNorm, sigLoaded, sigX, y, SIG_MAX_W, SIG_MAX_H);
       if (sigOk) {
         doc.setLineWidth(0.3);
         doc.setDrawColor(...LIGHT);
