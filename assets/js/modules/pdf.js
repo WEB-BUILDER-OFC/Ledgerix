@@ -5,6 +5,12 @@
  *           Preview uses style.display (not classList) to override inline display:none.
  * v2.11: Professional PDF — logo, signature, watermark, improved layout.
  *         HTML preview also updated: signature area improved, watermark added.
+ * v2.11.1: PDF currency fix — ₹ (U+20B9) is outside CP1252/WinAnsi, the encoding
+ *           used by jsPDF's built-in helvetica font. Passing ₹ to doc.text() causes
+ *           jsPDF to fall back to character-by-character glyph positioning, producing
+ *           "₹ 1 0 , 0 0 0 . 0 0" spacing artifacts. Fixed with a PDF-local formatter
+ *           that substitutes "Rs." for the INR symbol in all doc.text() calls only.
+ *           HTML preview and formatMoney() are completely unchanged.
  */
 
 'use strict';
@@ -12,6 +18,20 @@
 import * as State from '../core/state.js';
 import { showToast } from '../ui/toast.js';
 import { esc, formatMoney, numberToWords } from '../utils/helpers.js';
+
+// ── PDF-safe currency formatter ───────────────────────────────────────────────
+// jsPDF 2.5.1 uses WinAnsi (CP1252) encoding for built-in fonts (helvetica, courier, times).
+// The Indian Rupee sign ₹ (U+20B9) is NOT in CP1252 (range 0x00–0xFF only, decimal 0–255).
+// Passing ₹ to doc.text() causes jsPDF to switch to per-glyph positioning,
+// producing spaced/broken rendering like "₹ 1 0 , 0 0 0 . 0 0".
+// This formatter is used ONLY inside downloadPDFFromData() — never in HTML preview.
+// $ (U+0024) and £ (U+00A3) are in CP1252 and work fine with jsPDF — kept as-is.
+// € (U+20AC) is also outside standard CP1252 but jsPDF maps it via CP1252's 0x80 slot — kept.
+function _pdfMoney(amount) {
+  const raw = formatMoney(amount);
+  // Replace ₹ with "Rs." — professional Indian business notation, fully CP1252-safe
+  return raw.replace('₹', 'Rs.');
+}
 
 // ── Preview ──────────────────────────────────────────────────────────────────
 
@@ -295,11 +315,11 @@ export async function downloadPDFFromData(data) {
         it.desc || '',
         it.hsn  || '',
         String(it.qty  || 1),
-        formatMoney(it.rate || 0),
+        _pdfMoney(it.rate || 0),
         (it.gst  || 0) + '%',
         (it.disc || 0) + '%',
-        formatMoney(gstAmt),
-        formatMoney(amt + gstAmt),
+        _pdfMoney(gstAmt),
+        _pdfMoney(amt + gstAmt),
       ];
     });
 
@@ -343,13 +363,13 @@ export async function downloadPDFFromData(data) {
 
     // Light background for totals
     const totLines = [
-      ['Subtotal',   formatMoney(subtotal)],
+      ['Subtotal',   _pdfMoney(subtotal)],
       ...(taxType === 'inter'
-        ? [['IGST', formatMoney(totalGST)]]
-        : [['CGST', formatMoney(totalGST / 2)], ['SGST', formatMoney(totalGST / 2)]]),
-      ...(shipping   ? [['Shipping',  formatMoney(shipping)]]  : []),
-      ...(packaging  ? [['Packaging', formatMoney(packaging)]] : []),
-      ...(handling   ? [['Handling',  formatMoney(handling)]]  : []),
+        ? [['IGST', _pdfMoney(totalGST)]]
+        : [['CGST', _pdfMoney(totalGST / 2)], ['SGST', _pdfMoney(totalGST / 2)]]),
+      ...(shipping   ? [['Shipping',  _pdfMoney(shipping)]]  : []),
+      ...(packaging  ? [['Packaging', _pdfMoney(packaging)]] : []),
+      ...(handling   ? [['Handling',  _pdfMoney(handling)]]  : []),
     ];
     const totBlockH = totLines.length * 5.5 + 14;
     doc.setFillColor(248, 250, 252);
@@ -383,7 +403,7 @@ export async function downloadPDFFromData(data) {
     doc.setTextColor(255, 255, 255);
     doc.text('Grand Total', totX, y + 2.5);
     doc.setTextColor(...GOLD);
-    doc.text(formatMoney(grandTotal), W - margin, y + 2.5, { align: 'right' });
+    doc.text(_pdfMoney(grandTotal), W - margin, y + 2.5, { align: 'right' });
     y += 12;
 
     // Amount in words
