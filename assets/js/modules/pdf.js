@@ -11,6 +11,10 @@
  *           "₹ 1 0 , 0 0 0 . 0 0" spacing artifacts. Fixed with a PDF-local formatter
  *           that substitutes "Rs." for the INR symbol in all doc.text() calls only.
  *           HTML preview and formatMoney() are completely unchanged.
+ * v2.11.1 (cont.): _pdfMoney now also strips any char >0xFF (safety net);
+ *           totals block rewritten as a deterministic panel (panelX/padL/padR,
+ *           rowH-based height, Grand Total inside panel, amount-only font shrink).
+ *           sw.js cache names bumped so the fixed pdf.js actually reaches devices.
  */
 
 'use strict';
@@ -29,8 +33,15 @@ import { esc, formatMoney, numberToWords } from '../utils/helpers.js';
 // € (U+20AC) is also outside standard CP1252 but jsPDF maps it via CP1252's 0x80 slot — kept.
 function _pdfMoney(amount) {
   const raw = formatMoney(amount);
-  // Replace ₹ with "Rs." — professional Indian business notation, fully CP1252-safe
-  return raw.replace('₹', 'Rs.');
+  // 1) INR symbol -> "Rs. " (CP1252-safe, keeps the currency visible)
+  // 2) Safety net: any remaining char outside Latin-1 (>0xFF) would push jsPDF into
+  //    16-bit encoding and re-create the spaced-glyph bug, so it is replaced by '?'.
+  //    € and the AED symbol are also written as text codes (EUR / AED) for the same reason.
+  return raw
+    .replace('\u20B9', 'Rs. ')
+    .replace('\u20AC', 'EUR ')
+    .replace('\u062F.\u0625', 'AED ')
+    .replace(/[^\u0000-\u00FF]/g, '?');
 }
 
 // ── Preview ──────────────────────────────────────────────────────────────────
@@ -323,6 +334,10 @@ export async function downloadPDFFromData(data) {
       ];
     });
 
+    const MONEY_COLS     = [4, 7, 8];                 // Rate, Tax Amt, Total
+    const MONEY_PAD      = { top: 3, bottom: 3, left: 2, right: 2 };
+    const MONEY_USABLE_W = 22 - MONEY_PAD.left - MONEY_PAD.right;
+
     doc.autoTable({
       startY: y,
       head: [['#', 'Description', 'HSN', 'Qty', 'Rate', 'GST%', 'Disc%', 'Tax Amt', 'Total']],
@@ -339,20 +354,37 @@ export async function downloadPDFFromData(data) {
         1: { cellWidth: 47 },
         2: { cellWidth: 18 },
         3: { cellWidth: 10, halign: 'center' },
-        4: { cellWidth: 22, halign: 'right' },
+        4: { cellWidth: 22, halign: 'right', cellPadding: MONEY_PAD },
         5: { cellWidth: 14, halign: 'center' },
         6: { cellWidth: 14, halign: 'center' },
-        7: { cellWidth: 22, halign: 'right' },
-        8: { cellWidth: 22, halign: 'right' },
+        7: { cellWidth: 22, halign: 'right', cellPadding: MONEY_PAD },
+        8: { cellWidth: 22, halign: 'right', cellPadding: MONEY_PAD },
       },
       margin: { left: margin, right: margin },
+      // Money cells ("Rs. 1,039,500.00") can be wider than a fixed 22 mm column.
+      // Shrink only that cell's font so it fits on one line (no wrap, no spill).
+      didParseCell: (h) => {
+        if (h.section !== 'body' || !MONEY_COLS.includes(h.column.index)) return;
+        const txt = (h.cell.text || []).join('');
+        if (!txt) return;
+        let size = 7;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(size);
+        while (size > 5 && doc.getTextWidth(txt) > MONEY_USABLE_W) {
+          size -= 0.25;
+          doc.setFontSize(size);
+        }
+        h.cell.styles.fontSize = size;
+      },
     });
 
     y = doc.lastAutoTable.finalY + 5;
 
-    // ── Totals block ──────────────────────────────────────────────────────────
-    const totW     = 75;
-    const totX     = W - margin - totW;
+    // ── Totals panel (deterministic geometry) ─────────────────────────────────
+    // One rectangle contains every row AND the Grand Total bar.
+    //   panelX   = W - margin - panelW
+    //   labelX   = panelX + padL
+    //   amountX  = panelX + panelW - padR   (right-aligned anchor, never exceeded)
     const taxType  = data.taxType || 'intra';
     const totalGST = parseFloat(data.totalGST  || 0);
     const subtotal = parseFloat(data.subtotal   || 0);
@@ -361,7 +393,18 @@ export async function downloadPDFFromData(data) {
     const packaging  = parseFloat(data.packaging  || 0);
     const handling   = parseFloat(data.handling   || 0);
 
-    // Light background for totals
+    const panelW   = 80;
+    const panelX   = W - margin - panelW;
+    const padL     = 4;
+    const padR     = 4;
+    const labelX   = panelX + padL;
+    const amountX  = panelX + panelW - padR;
+    const rowH     = 6;          // every normal row
+    const padTop   = 2;          // inside top edge
+    const gtH      = 11;         // Grand Total bar height
+    const availW   = panelW - padL - padR;
+    const GAP      = 3;          // min gap between label and amount
+
     const totLines = [
       ['Subtotal',   _pdfMoney(subtotal)],
       ...(taxType === 'inter'
@@ -371,40 +414,62 @@ export async function downloadPDFFromData(data) {
       ...(packaging  ? [['Packaging', _pdfMoney(packaging)]] : []),
       ...(handling   ? [['Handling',  _pdfMoney(handling)]]  : []),
     ];
-    const totBlockH = totLines.length * 5.5 + 14;
-    doc.setFillColor(248, 250, 252);
-    doc.rect(totX - 4, y - 3, totW + 4, totBlockH, 'F');
-    doc.setDrawColor(...LIGHT);
-    doc.setLineWidth(0.3);
-    doc.rect(totX - 4, y - 3, totW + 4, totBlockH);
+    const gtText    = _pdfMoney(grandTotal);
+    const rowsH     = padTop + totLines.length * rowH;
+    const panelH    = rowsH + gtH;
+    const panelTop  = y;
 
-    doc.setFontSize(7.5);
+    // Draws right-aligned amount; shrinks the AMOUNT font only if label+gap+amount
+    // would not fit inside availW. Restores the original size afterwards.
+    const _fitAmount = (label, amount, baseSize, labelSize) => {
+      doc.setFontSize(labelSize);
+      const lw = doc.getTextWidth(label);
+      let size = baseSize;
+      doc.setFontSize(size);
+      while (size > 5 && lw + GAP + doc.getTextWidth(amount) > availW) {
+        size -= 0.5;
+        doc.setFontSize(size);
+      }
+      return size;
+    };
+
+    // Panel background + single outer border
+    doc.setFillColor(248, 250, 252);
+    doc.rect(panelX, panelTop, panelW, panelH, 'F');
+
+    // Normal rows
     doc.setFont('helvetica', 'normal');
-    totLines.forEach(([lbl, val]) => {
+    totLines.forEach(([lbl, val], i) => {
+      const baseline = panelTop + padTop + i * rowH + rowH / 2 + 1.1;
+      const size = _fitAmount(lbl, val, 7.5, 7.5);
+      doc.setFontSize(7.5);
       doc.setTextColor(...MID);
-      doc.text(lbl, totX, y);
+      doc.text(lbl, labelX, baseline);
+      doc.setFontSize(size);
       doc.setTextColor(...DARK);
-      doc.text(val, W - margin, y, { align: 'right' });
-      y += 5.5;
+      doc.text(val, amountX, baseline, { align: 'right' });
     });
 
-    // Divider before grand total
-    y += 1;
-    doc.setDrawColor(...NAVY);
-    doc.setLineWidth(0.6);
-    doc.line(totX - 4, y, W - margin, y);
-    y += 4;
-
-    // Grand Total highlight
+    // Grand Total bar — inside the same panel, same left/right edges
+    const gtTop = panelTop + rowsH;
     doc.setFillColor(...NAVY);
-    doc.rect(totX - 4, y - 4, totW + 4, 10, 'F');
-    doc.setFontSize(10);
+    doc.rect(panelX, gtTop, panelW, gtH, 'F');
     doc.setFont('helvetica', 'bold');
+    const gtBase = gtTop + gtH / 2 + 1.3;
+    const gtSize = _fitAmount('Grand Total', gtText, 10, 10);
+    doc.setFontSize(10);
     doc.setTextColor(255, 255, 255);
-    doc.text('Grand Total', totX, y + 2.5);
+    doc.text('Grand Total', labelX, gtBase);
+    doc.setFontSize(gtSize);
     doc.setTextColor(...GOLD);
-    doc.text(_pdfMoney(grandTotal), W - margin, y + 2.5, { align: 'right' });
-    y += 12;
+    doc.text(gtText, amountX, gtBase, { align: 'right' });
+
+    // Outer border drawn last so it sits cleanly over both fills
+    doc.setDrawColor(...LIGHT);
+    doc.setLineWidth(0.3);
+    doc.rect(panelX, panelTop, panelW, panelH);
+
+    y = panelTop + panelH + 6;
 
     // Amount in words
     doc.setFontSize(7);
