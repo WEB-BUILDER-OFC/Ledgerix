@@ -1,6 +1,6 @@
 # LEDGERIX — PROJECT RECORD
 **Single source of permanent memory and honest audit for the Ledgerix web application.**
-Last updated: 2026-09-17 | Build: v2.11
+Last updated: 2026-10-05 | Build: v2.11.1 (release cleanup complete)
 
 ---
 
@@ -16,7 +16,7 @@ It solves the problem of affordable, offline-capable GST invoice generation for 
 
 ## Current Version
 
-- **App version:** `v2.10` (as declared in `CACHE_NAME = 'ledgerix-v2.10-shell'`; `app.config.js` still shows `v2.0` — a minor version string inconsistency)
+- **App version:** `v2.11.1` (as declared in `CACHE_NAME = 'ledgerix-v2.11.1-shell'`; `APP_VERSION` in `app.config.js`, the `index.html` splash/sidebar/footer labels and the README title were synchronised to `v2.11.1` during the v2.11.1 release cleanup, 2026-10-05)
 - **Status:** Functional single-file app. Core invoice lifecycle is production-quality. Several secondary features are solid. A few areas are basic or still maturing.
 - **Verification status:** All critical/non-critical bugs from the latest audit cycle have been fixed and statically verified. Browser/device verification pass has not yet been performed.
 
@@ -470,7 +470,7 @@ At larger scale (multiple users, shared devices, multi-branch businesses), the c
 
 **Cache update behavior:** When a new version is deployed, the SW activates automatically (`skipWaiting`) but cached content is only replaced after the next page load. The page sends a `SKIP_WAITING` message on detecting a waiting SW, which forces immediate activation. A full page reload then fetches updated assets.
 
-**Known risk:** If `CACHE_NAME` (currently `ledgerix-v2.10-shell`) is not bumped on deploy, old cached JS may be served to returning users. Cache name must be updated in `sw.js` on every meaningful code deploy.
+**Known risk:** If `CACHE_NAME` (currently `ledgerix-v2.11.1-shell`) is not bumped on deploy, old cached JS may be served to returning users. Cache name must be updated in `sw.js` on every meaningful code deploy.
 
 ---
 
@@ -957,6 +957,52 @@ All three security-critical files (`security.js`, `storage.js`, `state.js`) were
 - Confirm no broken image icons appear for missing logo/sig
 - Confirm printout is professional and readable
 
+### [2026-10-05, v2.11.1] — PDF Money Glyph Corruption, Totals-Panel Overflow, and Stale Service Worker Cache
+
+**Problem (observed on a real Android PDF):** The v2.11 PDF loaded the new design (navy header, logo, signature, watermark, navy footer) but money values rendered as spaced, broken glyphs — roughly `¹ 1 0 , 0 0 0 . 0 0` instead of `₹10,000.00` — in Rate, Tax Amt, Total, Subtotal, CGST/SGST, Shipping/Packaging/Handling and Grand Total. The Grand Total amount also extended past the right edge of its panel. The HTML preview was correct throughout.
+
+**Root cause 1 — PDF money glyphs (WinAnsi / ₹):**
+- jsPDF 2.5.1's built-in Helvetica uses WinAnsi (CP1252). The rupee sign ₹ (U+20B9) is outside 0x00–0xFF.
+- When a string passed to `doc.text()` contains a code point above 0xFF, jsPDF encodes the whole string in a 16-bit form with a `\0` byte between characters. The font draws each `\0` as an advance, producing `1 0 , 0 0 0`. The leading `¹` in the screenshot is U+20B9 truncated to its low byte 0xB9, which is `¹` in WinAnsi.
+- Only strings containing ₹ were affected. Plain labels, HSN, `5%`, and the amount in words rendered normally, so this was not global text state (no `setCharSpace`, text-render-mode or `setR2L` calls exist in the generator).
+- Every PDF money value flows through one helper into the same jsPDF instance — autoTable cells and the totals block alike.
+
+**Root cause 2 — totals-panel overflow:**
+- `align:'right'` positions text using the measured width of the string; with the 16-bit encoding the rendered text is wider than measured, so it overshoots the anchor.
+- Independently, the old geometry had zero right padding: panel `x=117, w=79` (right edge 196) with amounts anchored at `W - margin = 196`. Left padding was 4 mm, right padding 0.
+
+**Root cause 3 — why the first fix never reached the device (stale Service Worker):**
+- A `₹ → Rs.` substitution had already been added to `_pdfMoney()` in `pdf.js` (v2.11.1 header comment). The deployed Android build nevertheless still showed `¹`.
+- `sw.js` still declared `CACHE_NAME = 'ledgerix-v2.11-shell'` and serves the app shell cache-first (`cacheFirstShell`). A changed `pdf.js` under an unchanged cache name is never refetched, so the device kept running the previous `pdf.js`.
+- Why the original v2.11 failed on a real device: v2.11 passed `formatMoney()` output (containing ₹) straight to `doc.text()`. That could not be observed in the sandbox because the jsPDF CDN was unreachable (PDF subtests were BLOCKED), so the defect first appeared on Android.
+
+**Change Made:**
+1. `sw.js` — `CACHE_NAME` `ledgerix-v2.11-shell` → `ledgerix-v2.11.1-shell`; `CDN_CACHE_NAME` `ledgerix-v2.11-cdn` → `ledgerix-v2.11.1-cdn`. No other service-worker behavior changed (install, activate cleanup, skipWaiting, clients.claim, cache-first shell, network-first CDN, `SHELL_ASSETS`).
+2. `pdf.js` `_pdfMoney()` — PDF-only. Keeps `₹ → "Rs. "` and adds a safety net so no character above 0xFF can reach jsPDF: `€ → "EUR "`, the AED symbol → `"AED "`, any other character above 0xFF → `?`. Global `formatMoney()` and the HTML preview are unchanged. Western digit grouping is deliberately unchanged.
+3. `pdf.js` totals block — replaced with a deterministic panel: `panelW = 80`, `panelX = W - margin - panelW` (116), `padL = padR = 4`, `labelX = panelX + padL`, `amountX = panelX + panelW - padR` (192), `rowH = 6`, `padTop = 2`, `gtH = 11`. Panel height = `padTop + rows × rowH + gtH`. One rectangle contains all rows and the navy Grand Total bar (same x and width); the border is drawn last. Amounts are right-aligned at `amountX`. If label + 3 mm gap + amount does not fit, only that amount's font shrinks (floor 5 pt); the panel never moves.
+4. `pdf.js` items table — Rate, Tax Amt and Total columns get 2 mm side padding and a `didParseCell` hook that shrinks only that cell's font (7 pt down to 5 pt) so `Rs. 1,039,500.00` stays on one line in the existing 22 mm columns. Column widths unchanged.
+
+**Files / Functions Affected:** `sw.js` (two constants); `assets/js/modules/pdf.js` (`_pdfMoney`, the totals block of `downloadPDFFromData`, the autoTable money columns and header comment).
+
+**Files NOT changed:** `helpers.js`, `invoice.js`, `dashboard.js`, `reports.js`, `profile.js`, `app.js`, `settings.js`, `security.js`, `storage.js`, `state.js`, `index.html`, `manifest.json`, `generateInvoiceHTML()` and the rest of the HTML preview (byte-identical). Logo, signature, watermark, header, footer and WEBP normalization code were not edited.
+
+**Verification:**
+- Sandbox regression (Playwright Chromium, localhost): 73/73 PASS — details in Part 16.
+- Real Android PDF (user-supplied screenshot, reported PASS by the user): money renders as `Rs.` values with no spacing or glyph artifacts; the totals panel is contained and the Grand Total stays inside it; logo, signature, watermark, navy header and navy footer render; overall layout correct.
+
+**Result:** v2.11.1 — BROWSER + REAL ANDROID PDF VERIFIED.
+
+**Remaining / noted (not changed in this fix):**
+- PDF shows `Rs.` while the HTML preview shows ₹ (intentional; ₹ is not representable in jsPDF built-in fonts). A future option is embedding a Unicode TTF such as Noto Sans to restore ₹ in the PDF.
+- `formatMoney()` uses Western digit grouping (`1,039,800.00`), not Indian grouping, in both preview and PDF. Unchanged by decision.
+- Empty meta/Bill-To fields fall back to `—` (U+2014), also above 0xFF; this path was not exercised on a device.
+- The rotated "Ledgerix" side watermark sits roughly 12 mm from the right edge rather than the intended 4 mm (jsPDF center-alignment with rotation); cosmetic, unchanged.
+
+**Release cleanup (2026-10-05, v2.11.1):**
+- **PWA icons added** — the archive handed over for this build had an empty `assets/icons/`, so `manifest.json` referenced `icon-192.png` / `icon-512.png` that did not exist. Regenerated both (192×192 and 512×512 PNG, RGB) with Pillow: navy `#0a1628` background, gold `#c9a84c` serif "L" lettermark (Lora Bold; the app UI uses Playfair Display, not installed in the build sandbox), glyph kept inside the maskable safe zone. Manifest paths unchanged. Dimensions, PNG format and safe-zone containment verified; install prompt / home-screen icon on a device NOT tested.
+- **Version labels synchronised to `v2.11.1`:** `config/app.config.js` (`APP_VERSION`), `index.html` (head comment, splash sub-label, sidebar sub-label, footer), `README.md` title, and the "Current Version" and cache-name statements in this record. Historical entries were left as written.
+- **Not changed (deliberately):** `security.js` PIN overlay still reads "v2.6 — Enter your PIN to continue" (security.js was out of scope for this cleanup); all PDF, SW, calculation, state, storage and preview code untouched.
+
 ## Full Live Feature Verification (v2.10, pre-fix)
 
 **Method:** Exhaustive code-path tracing of all JS modules, HTML structure, cross-module wiring, and DOM ID references. Every module's exports, imports, and bridge registrations were audited.
@@ -1087,6 +1133,45 @@ HTML invoice preview fully verified. PDF generator code is correct; rendering pe
 **Privacy masking decision (permanent record):**
 Ledgerix has no demo/sample mode. All data displayed in invoices is user-entered. No privacy masking was applied to actual invoice data. If a future Demo/Privacy Preview mode is introduced, masking should be implemented exclusively for that context. Production GST invoices must retain complete business, client, and bank details as required by Indian GST regulations.
 
+## v2.11.1 Regression & Real-Device PDF Verification (2026-10-05)
+
+**Scope:** `sw.js` (cache names) and `assets/js/modules/pdf.js` (`_pdfMoney`, totals panel, table money columns). No other file changed.
+
+**Method:** Playwright Chromium headless, localhost HTTP, external CDNs unreachable (jsPDF, autoTable, Chart.js, fonts all blocked, same as the sandbox before). The app was driven through its real UI/bridge. For PDF tests the **real `pdf.js`** ran against a **mock jsPDF** that used true Helvetica/Helvetica-Bold metrics (pdf-lib) and recorded every `text()`, `rect()` and `addImage()` call, fed by real `getInvoiceData()` output. Chart.js was stubbed with a recording constructor.
+
+**Result: 73/73 PASS — 0 FAIL.**
+
+| Area | Checks | Class | Notes |
+|---|---|---|---|
+| Boot / bridge / FY invoice number | 3/3 | Browser runtime | No JS page errors |
+| Profile save + logo/signature upload (real file input, WEBP) | 3/3 | Browser runtime | Encrypted at rest (`"v":2`, no plaintext name) |
+| Invoice calculations | 4/4 | Browser runtime | 10×5000@18% = 59,000; discount + shipping/packaging/handling = 53,275; amount in words |
+| HTML invoice preview | 5/5 | Browser runtime | Intra: CGST+SGST; inter: IGST only; ₹ preserved; no `[object Object]`; logo+signature `<img>` |
+| Save / history / counter | 4/4 | Browser runtime | `State.setInvoiceCounter` path: counter 1→2→3, distinct numbers, list renders |
+| Dashboard GST aggregation | 3/3 | Browser runtime + stub | CGST 4,500 / SGST 4,500 / IGST 3,600; chart data `[4500,4500,3600]` verified via **stubbed** Chart.js |
+| Reports | 2/2 | Browser runtime | Export bar stable after generate ×2 (flex, 4 buttons); CSV downloads |
+| GST calculator | 1/1 | Browser runtime | 10,000@18%: CGST 900, final 11,800 |
+| Persistence across reload | 2/2 | Browser runtime | Profile incl. logo/signature, invoices, counter |
+| PIN / security | 6/6 | Browser runtime | PBKDF2 hash+salt stored, overlay on reload, wrong PIN rejected, correct PIN unlocks and decrypts, PIN removable |
+| PDF generation + money + totals panel + images | 35/35 | Real `pdf.js` + **mock jsPDF** | See below |
+| Service Worker v2.11.1 | 5/5 | Browser runtime (localhost) | Fresh context: seeded stale `v2.11-shell`, `v2.11-cdn`, `v2.10-shell` caches → new SW activated → only `ledgerix-v2.11.1-shell` remained; formerly stale `pdf.js` then served the new file; all 27 `SHELL_ASSETS` exist on disk |
+
+PDF suite detail (mock jsPDF): no character above 0xFF reaches `doc.text()` or table cells (intra, inter, extreme 10-digit); all totals amounts right-edge = 192.000 = `panelX + panelW - 4` for intra, inter and a ₹1,040,037,037.63 case; Grand Total bar shares the panel's x/width and its amount stays inside; CGST/SGST rows for intra, IGST for inter; Shipping/Packaging/Handling rows; item Rate/Tax/Total use `Rs.`; values match the screenshot case (Subtotal `Rs. 990,000.00`, CGST/SGST `Rs. 24,750.00`, Grand Total `Rs. 1,039,800.00`); zero → `Rs. 0.00`; navy header (full width, 32 mm) and navy footer (y=285, 12 mm) drawn; gold accent line; rotated "Ledgerix" watermark drawn first; footer text and label; WEBP logo/signature normalised to PNG; PNG and JPEG pass through unchanged; corrupt logo handled without throwing; no-logo/no-signature path draws a 24 mm band and no images.
+
+**Real-device result (Android):** user-supplied screenshot of the actual generated PDF, reported by the user as PASS — money renders as `Rs.` values with no spacing/glyph artifacts; totals panel contained; Grand Total inside the panel; logo, signature, watermark, navy header and footer all render; layout correct. (Claude did not re-examine that screenshot independently; the record states it as reported by the user.)
+
+**Environment-blocked / not verified by Claude:**
+- Real jsPDF 2.5.1 / autoTable 3.8.1 rendering in the sandbox (CDN unreachable) — covered on the real device by the user's screenshot instead; the sandbox used a metrics-accurate mock.
+- Real Chart.js canvas rendering (CDN unreachable) — chart *data* verified via a stub only.
+- Service worker on the real HTTPS deployment: activation/cache purge verified on localhost only; on the device it is inferred from the fixed PDF (new `pdf.js` is running), not from inspecting Cache Storage.
+- Print dialog, OCR (Tesseract CDN), WhatsApp/Email/Telegram share, PWA install prompt, offline mode on device, iOS behavior, backup-restore file picker.
+- **PWA icon files:** the project archive supplied for this build contains an empty `assets/icons/` directory — `icon-192.png` and `icon-512.png`, which `manifest.json` references, are not in the archive and were not regenerated in this fix. Installability/home-screen icon was therefore not verifiable from the archive.
+
+---
+
+**Release cleanup verification (2026-10-05):** after adding the PWA icons and synchronising version labels, the same 73-check suite was re-run against the extracted final ZIP: 73/73 PASS. Static checks: icons are 192×192 and 512×512 PNG; `manifest.json` icon paths resolve to files in the archive; no stale `v2.10`/`v2.0` labels remain in `index.html`, `app.config.js` or the README; `sw.js`, `pdf.js` and `invoice.js` are byte-identical to the pre-cleanup v2.11.1 build; exactly one project record. Real-device PWA install / home-screen icon: not tested.
+
+---
 
 # PART 17 — IMPORTANT PROJECT DECISIONS
 
@@ -1236,6 +1321,15 @@ The pattern `State.profile.fy || currentFY()` is deliberate. Saved FY must alway
 - Data persistence across page reload — invoices, clients, products all survive
 - Share modal — all 4 destinations present, no script injection
 
+### v2.11.1 — Playwright Chromium 73/73 PASS + Real Android PDF (2026-10-05)
+
+- PDF money rendering — `Rs.` values, no spaced/broken glyphs (real Android PDF verified per user screenshot; mock-jsPDF checks 35/35 in sandbox)
+- PDF totals panel — contained, 4 mm right padding, Grand Total inside the panel (real Android + sandbox geometry checks)
+- PDF logo, signature, watermark, navy header/footer — render on real Android; drawn correctly in sandbox mock
+- WEBP logo/signature → PNG normalization — sandbox browser verified (real Chromium canvas); PNG/JPEG passthrough
+- Service Worker v2.11.1 — stale-cache purge and new `pdf.js` delivery verified on localhost; fixed PDF on device confirms new code is running
+- Invoice calculations, intra CGST/SGST, inter IGST, save/history/counter (`setInvoiceCounter`), dashboard aggregation, reports export bar, profile persistence, PIN/security, HTML preview — all re-verified, unchanged
+
 ### v2.11 — Playwright Chromium, 2026-09-17 (41/41 PASS)
 
 - Invoice HTML preview — professional navy/gold layout confirmed
@@ -1260,15 +1354,15 @@ The pattern `State.profile.fy || currentFY()` is deliberate. Saved FY must alway
 
 These could not be tested in the sandbox and genuinely require a real deployment:
 
-- PDF download and content quality (jsPDF CDN must be reachable)
+- ~~PDF download and content quality~~ — VERIFIED on real Android (v2.11.1, per user screenshot); iOS/desktop PDF viewers not tested
 - Print dialog output (requires browser with display)
 - WhatsApp/Email/Telegram share (requires device apps)
 - OCR scanning accuracy (requires Tesseract CDN + real bill image)
 - PWA installation prompt (requires HTTPS + Android/desktop browser)
-- Service Worker registration (requires HTTPS)
+- Service Worker registration on HTTPS — v2.11.1 verified on localhost; real-device activation inferred from fixed PDF (Cache Storage not inspected)
 - Offline behavior on installed PWA (requires SW cache populated over HTTPS)
 - iOS PWA behavior and SW compatibility
-- Logo/signature file upload (FileReader + file picker)
+- Logo/signature file upload (FileReader + file picker) — WEBP upload verified in sandbox via file input; PDF rendering of both verified on Android
 - Backup restore from file (file picker)
 - Mobile responsive layout on real narrow-viewport device
 
@@ -1282,6 +1376,12 @@ These could not be tested in the sandbox and genuinely require a real deployment
 - Inventory stock field is a data field only — not decremented on invoice save
 - Fonts and icons require CDN (cached by SW after first load)
 - Currency options in Settings UI (INR, $, €) do not match full symbol map in `formatMoney()` (INR, USD, EUR, GBP, AED, SGD) — non-blocking
+- PDF shows `Rs.` (not ₹) because jsPDF built-in fonts cannot encode U+20B9; HTML preview shows ₹. Embedding a Unicode TTF would restore ₹ in the PDF (not done)
+- `formatMoney()` uses Western digit grouping (1,039,800.00), not Indian (10,39,800.00), in preview and PDF — unchanged by decision
+- Side "Ledgerix" watermark sits ~12 mm from the page edge instead of 4 mm (jsPDF rotated center-align) — cosmetic
+- `—` placeholder (U+2014) for empty meta fields in the PDF not exercised on a device
+- PWA icons regenerated in the v2.11.1 release cleanup (navy/gold "L"); install prompt, home-screen and maskable rendering on a real device not tested
+- PIN overlay text in `security.js` still reads "v2.6" (security.js intentionally untouched in the release cleanup); all other version labels read v2.11.1
 
 ## Known Risks (Unchanged)
 
@@ -1303,7 +1403,9 @@ These could not be tested in the sandbox and genuinely require a real deployment
 - Node.js runtime verification: COMPLETE (all critical logic)
 - v2.10 browser verification (Playwright Chromium sandbox): COMPLETE — 150 PASS / 0 FAIL / 6 BLOCKED (env limits)
 - v2.11 regression verification (Playwright Chromium sandbox): COMPLETE — 41/41 PASS / 0 FAIL — `BROWSER VERIFIED WITH ENVIRONMENT-BLOCKED PDF SUBTESTS`
-- Real-device / HTTPS / PWA / PDF-with-CDN verification: NOT YET PERFORMED
+- v2.11.1 regression verification (Playwright Chromium sandbox): COMPLETE — 73/73 PASS / 0 FAIL (real `pdf.js` + metrics-accurate mock jsPDF; Chart.js stubbed)
+- v2.11.1 real-device PDF verification (Android): PASS — reported by user from a screenshot of the generated PDF
+- Still not performed: HTTPS PWA install, offline on device, iOS, print dialog, OCR, share apps, backup-restore picker
 
 ## Current Recommended Next Phase
 
@@ -1322,7 +1424,7 @@ These could not be tested in the sandbox and genuinely require a real deployment
 11. Run OCR scan with a real printed bill image
 12. Verify print dialog and output on a connected printer
 
-**The application is functionally complete for small Indian business local billing.** All core features work. The HTML invoice preview is professional and verified. PDF rendering is the primary remaining real-device item.
+**The application is functionally complete for small Indian business local billing.** All core features work. The HTML invoice preview and the Android PDF output are verified. Remaining real-device items are the PWA/offline/iOS/print/OCR/share/restore checks listed above (the PDF items in the list above were completed for Android in v2.11.1).
 
-**v2.11 IMPLEMENTATION VERIFIED — PDF RENDERING PENDING REAL-DEVICE/CDN VERIFICATION**
+**v2.11.1 — BROWSER + REAL ANDROID PDF VERIFIED**
 

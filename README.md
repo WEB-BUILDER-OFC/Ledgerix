@@ -1,4 +1,4 @@
-# Ledgerix v2.0 — GST Billing & Business Management
+# Ledgerix v2.11.1 — GST Billing & Business Management
 
 Professional, enterprise-grade GST billing application for Indian businesses.
 
