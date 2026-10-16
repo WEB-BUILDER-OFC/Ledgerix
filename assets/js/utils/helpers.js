@@ -160,3 +160,38 @@ export function currentFY() {
   const endYY = String(startYear + 1).slice(-2);
   return startYear + '-' + endYY;
 }
+
+// ── File download helpers (v2.11.2) ──────────────────────────────────────────
+
+// Makes a string safe to use as a download file name on Android/Windows/iOS:
+// invoice numbers such as "INV/2026-27/0002" contain "/" which many download
+// managers reject or truncate.
+export function safeFilename(name, fallback = 'download') {
+  const cleaned = String(name == null ? '' : name)
+    .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_')
+    .replace(/\s+/g, ' ')
+    .replace(/^[.\s_]+|[\s_]+$/g, '')
+    .slice(0, 120);
+  return cleaned || fallback;
+}
+
+// Saves a Blob as a file. The anchor is attached to the DOM (required by several
+// Android browsers / WebViews) and the object URL is revoked only after the browser
+// has had time to start the download. Returns true when the download was triggered.
+export function downloadBlob(blob, filename) {
+  if (!(blob instanceof Blob) || blob.size === 0) return false;
+  try {
+    const url = URL.createObjectURL(blob);
+    const a   = document.createElement('a');
+    a.href = url; a.download = safeFilename(filename, 'download'); a.rel = 'noopener';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { try { document.body.removeChild(a); } catch (_) {} URL.revokeObjectURL(url); }, 4000);
+    return true;
+  } catch (e) {
+    console.error('[download] failed', e);
+    return false;
+  }
+}
+

@@ -21,7 +21,7 @@
 
 import * as State from '../core/state.js';
 import { showToast } from '../ui/toast.js';
-import { esc, formatMoney, numberToWords } from '../utils/helpers.js';
+import { esc, formatMoney, numberToWords, safeFilename, downloadBlob } from '../utils/helpers.js';
 
 // ── PDF-safe currency formatter ───────────────────────────────────────────────
 // jsPDF 2.5.1 uses WinAnsi (CP1252) encoding for built-in fonts (helvetica, courier, times).
@@ -89,30 +89,72 @@ function _loadImg(dataUri) {
   });
 }
 
-// Normalise a loaded Image to a jsPDF-safe PNG data URI.
-// - PNG and JPEG are passed directly (already supported by jsPDF 2.5.1).
-// - WEBP, GIF, and any other format are drawn onto an off-screen canvas
-//   and exported as PNG — avoiding jsPDF's lack of native WEBP support
-//   (critical on Android where camera images are typically WEBP).
-// Returns { dataUri: string, format: 'PNG'|'JPEG' } or null on failure.
-function _normaliseImg(loadedImg, originalUri) {
+// Prepare a loaded Image for jsPDF at print-quality resolution (v2.11.2).
+//
+// Why: the original file (up to 512 KB, often 1500–4000 px) used to be embedded untouched.
+// PDF viewers (Android PdfRenderer / Drive / Chrome) then shrink it to a ~30 mm box with
+// fast, un-filtered sampling, which looks jagged next to the HTML preview (the browser
+// downsizes with a high-quality filter). EXIF-rotated JPEGs, interlaced / 16-bit PNGs and
+// WEBP/GIF are also handled inconsistently by jsPDF.
+//
+// Fix: redraw the image ONCE, with high-quality stepped downscaling, at 600 DPI for the box
+// it will occupy (never upscaled, longest side capped at IMG_MAX_PX), as an 8-bit RGBA
+// canvas. Transparent images stay PNG (alpha kept); opaque photographic images become JPEG
+// at q=0.92 only when PNG would be large. Aspect ratio is never changed.
+// Returns { dataUri, format: 'PNG'|'JPEG', pxW, pxH } or null on failure.
+const IMG_DPI    = 600;
+const IMG_MAX_PX = 1600;
+
+function _scaleStep(src, sw, sh, dw, dh) {
+  const c = document.createElement('canvas');
+  c.width = dw; c.height = dh;
+  const x = c.getContext('2d');
+  x.imageSmoothingEnabled = true;
+  x.imageSmoothingQuality = 'high';
+  x.drawImage(src, 0, 0, sw, sh, 0, 0, dw, dh);
+  return c;
+}
+
+function _normaliseImg(loadedImg, originalUri, boxWmm = 40, boxHmm = 20) {
   if (!loadedImg) return null;
   try {
-    const isPNG  = originalUri.startsWith('data:image/png');
-    const isJPEG = originalUri.startsWith('data:image/jpeg') || originalUri.startsWith('data:image/jpg');
-    if (isPNG)  return { dataUri: originalUri, format: 'PNG'  };
-    if (isJPEG) return { dataUri: originalUri, format: 'JPEG' };
+    const sw = loadedImg.naturalWidth || loadedImg.width || 1;
+    const sh = loadedImg.naturalHeight || loadedImg.height || 1;
+    const aspect = sw / sh;
 
-    // For WEBP, GIF, or anything else: convert via canvas → PNG
-    const canvas = document.createElement('canvas');
-    canvas.width  = loadedImg.naturalWidth  || 1;
-    canvas.height = loadedImg.naturalHeight || 1;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(loadedImg, 0, 0);
-    const pngUri = canvas.toDataURL('image/png');
-    return { dataUri: pngUri, format: 'PNG' };
+    // size the image will occupy on the page (mm), exactly as _addImg will fit it
+    let dwMm = boxWmm, dhMm = dwMm / aspect;
+    if (dhMm > boxHmm) { dhMm = boxHmm; dwMm = dhMm * aspect; }
+
+    // target pixels @ IMG_DPI (600: still sharp when the PDF is zoomed), never above the source resolution
+    let tw = Math.max(1, Math.round(dwMm / 25.4 * IMG_DPI));
+    let th = Math.max(1, Math.round(dhMm / 25.4 * IMG_DPI));
+    if (tw > sw || th > sh) { tw = sw; th = sh; }               // no fake up-scaling
+    const cap = Math.min(1, IMG_MAX_PX / Math.max(tw, th));
+    tw = Math.max(1, Math.round(tw * cap)); th = Math.max(1, Math.round(th * cap));
+
+    // stepped halving keeps the filter from aliasing on big reductions
+    let cur = loadedImg, cw = sw, ch = sh;
+    while (cw / 2 >= tw && ch / 2 >= th) {
+      const nw = Math.max(tw, Math.floor(cw / 2)), nh = Math.max(th, Math.floor(ch / 2));
+      cur = _scaleStep(cur, cw, ch, nw, nh); cw = nw; ch = nh;
+    }
+    const canvas = _scaleStep(cur, cw, ch, tw, th);
+
+    // transparency check on the (small) final canvas
+    const px = canvas.getContext('2d').getImageData(0, 0, tw, th).data;
+    let hasAlpha = false;
+    for (let i = 3; i < px.length; i += 4) { if (px[i] < 250) { hasAlpha = true; break; } }
+
+    const png = canvas.toDataURL('image/png');
+    if (!hasAlpha && png.length * 0.75 > 250 * 1024) {
+      return { dataUri: canvas.toDataURL('image/jpeg', 0.92), format: 'JPEG', pxW: tw, pxH: th };
+    }
+    return { dataUri: png, format: 'PNG', pxW: tw, pxH: th };
   } catch (e) {
-    console.warn('[PDF] Image normalisation failed:', e);
+    console.warn('[PDF] Image normalisation failed, using original:', e);
+    if (/^data:image\/png/.test(originalUri))  return { dataUri: originalUri, format: 'PNG',  pxW: 0, pxH: 0 };
+    if (/^data:image\/jpe?g/.test(originalUri)) return { dataUri: originalUri, format: 'JPEG', pxW: 0, pxH: 0 };
     return null;
   }
 }
@@ -130,7 +172,8 @@ function _addImg(doc, normalised, loadedObj, x, y, maxW, maxH) {
     let dw = maxW;
     let dh = dw / aspect;
     if (dh > maxH) { dh = maxH; dw = dh * aspect; }
-    doc.addImage(normalised.dataUri, normalised.format, x, y, dw, dh);
+    // 'FAST' = lossless deflate for PNG (jsPDF default would store raw pixels); ignored for JPEG
+    doc.addImage(normalised.dataUri, normalised.format, x, y, dw, dh, undefined, normalised.format === 'PNG' ? 'FAST' : undefined);
     return true;
   } catch (e) {
     console.warn('[PDF] addImage failed:', e);
@@ -165,11 +208,11 @@ export async function downloadPDFFromData(data) {
     let sigNorm    = null;
     if (profile.logo) {
       logoLoaded = await _loadImg(profile.logo);
-      logoNorm   = _normaliseImg(logoLoaded.img, profile.logo);
+      logoNorm   = _normaliseImg(logoLoaded.img, profile.logo, 36, 24);   // header box 36 × 24 mm
     }
     if (profile.signature) {
       sigLoaded = await _loadImg(profile.signature);
-      sigNorm   = _normaliseImg(sigLoaded.img, profile.signature);
+      sigNorm   = _normaliseImg(sigLoaded.img, profile.signature, 48, 16);  // signature box 48 × 16 mm
     }
 
     const doc = new jsPDFCtor({ orientation: 'p', unit: 'mm', format: 'a4' });
@@ -558,7 +601,19 @@ export async function downloadPDFFromData(data) {
     doc.setFont('helvetica', 'bold');
     doc.text('Ledgerix', W - margin, pageH - 5.5, { align: 'right' });
 
-    doc.save((data.invNum || 'invoice') + '.pdf');
+    // Build the file ourselves so we can verify it is a real PDF before claiming success,
+    // use a filename Android accepts (invoice numbers contain "/"), and keep the object URL
+    // alive long enough for the download to start.
+    const fileName = safeFilename(data.invNum || 'invoice', 'invoice') + '.pdf';
+    let saved = false;
+    try {
+      const blob = typeof doc.output === 'function' ? doc.output('blob') : null;
+      if (blob && blob.size > 1000) {
+        const head = await blob.slice(0, 5).text();
+        if (head === '%PDF-') saved = downloadBlob(blob, fileName);
+      }
+    } catch (e) { console.warn('[PDF] blob download path failed, falling back to doc.save()', e); }
+    if (!saved) doc.save(fileName);
     showToast('PDF downloaded!', 'success');
 
   } catch (e) {

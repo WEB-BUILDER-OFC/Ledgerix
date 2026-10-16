@@ -21,8 +21,8 @@ self.addEventListener('message', event => {
 
 'use strict';
 
-const CACHE_NAME     = 'ledgerix-v2.11.1-shell';
-const CDN_CACHE_NAME = 'ledgerix-v2.11.1-cdn';
+const CACHE_NAME     = 'ledgerix-v2.11.4-shell';
+const CDN_CACHE_NAME = 'ledgerix-v2.11.4-cdn';
 
 // App shell — served from cache first
 const SHELL_ASSETS = [
@@ -53,6 +53,7 @@ const SHELL_ASSETS = [
   './assets/js/modules/search.js',
   './assets/js/modules/backup.js',
   './assets/js/modules/ocr.js',
+  './assets/js/modules/ocr-parser.js',
   './assets/js/modules/tabHandlers.js',
 ];
 
@@ -70,7 +71,10 @@ const CDN_PREFETCH = [
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then(cache => cache.addAll(SHELL_ASSETS))
+      // cache:'reload' bypasses the browser's HTTP cache. GitHub Pages sends max-age=600, so a plain
+      // addAll() could store files fetched minutes earlier (stale JS) under the NEW cache name and
+      // pin that stale mix until the next cache bump (reproduced in testing).
+      .then(cache => Promise.all(SHELL_ASSETS.map(url => cache.add(new Request(url, { cache: 'reload' })))))
       .then(() => self.skipWaiting())
       .catch(err => console.warn('[SW] Shell cache install error:', err))
   );

@@ -49,6 +49,7 @@ export async function saveProfile() {
   if (!validateGSTIN(gstin)) { showToast('Invalid GSTIN format (leave blank if unknown)', 'warning'); return; }
   if (!validatePhone(phone)) { showToast('Invalid phone number', 'warning'); return; }
 
+  const prevProfile = { ...State.profile };
   Object.assign(State.profile, {
     name,
     address: document.getElementById('profileAddr')?.value.trim(),
@@ -63,9 +64,33 @@ export async function saveProfile() {
     upi:     document.getElementById('profileUPI')?.value.trim(),
   });
 
-  await _saveProfile();
+  try {
+    await _saveProfile();
+  } catch (err) {
+    State.setProfile(prevProfile);                // keep memory and storage consistent
+    console.error('[Profile] save failed:', err);
+    showToast('Profile NOT saved: ' + (err && (err.name === 'QuotaExceededError' || err.code === 22)
+      ? 'browser storage is full — use a smaller logo/signature image.'
+      : (err && err.message) || 'unknown storage error'), 'error');
+    return;
+  }
   showToast('Profile saved!', 'success', true);
   loadProfileBanner();
+}
+
+// Logo / signature are persisted as soon as they are chosen (previously they only lived in
+// memory until "Save Profile" was pressed, so leaving the page silently lost them).
+async function _persistImage(key, label) {
+  try {
+    await _saveProfile();
+    showToast(`${label} saved!`, 'success');
+  } catch (err) {
+    delete State.profile[key];
+    console.error('[Profile] image save failed:', err);
+    showToast(`${label} NOT saved: browser storage is full or unavailable — use a smaller image.`, 'error');
+    const prev = document.getElementById(key === 'logo' ? 'logoPreview' : 'sigPreview');
+    if (prev) { prev.innerHTML = ''; prev.style.display = 'none'; }
+  }
 }
 
 export function loadProfileBanner() {
@@ -93,7 +118,7 @@ export function handleLogoUpload(e) {
     State.profile.logo = ev.target.result;
     const prev = document.getElementById('logoPreview');
     if (prev) { prev.innerHTML = `<img src="${ev.target.result}">`; prev.style.display = 'flex'; }
-    showToast('Logo uploaded!', 'success');
+    _persistImage('logo', 'Logo');
   };
   reader.readAsDataURL(file);
 }
@@ -106,17 +131,24 @@ export function handleSigUpload(e) {
     State.profile.signature = ev.target.result;
     const prev = document.getElementById('sigPreview');
     if (prev) { prev.innerHTML = `<img src="${ev.target.result}">`; prev.style.display = 'flex'; }
-    showToast('Signature uploaded!', 'success');
+    _persistImage('signature', 'Signature');
   };
   reader.readAsDataURL(file);
 }
 
 export async function clearProfile() {
   // Reset in-memory state
+  const prevProfile = State.profile;
   State.setProfile({});
 
   // Persist the cleared state through the existing encrypted storage path
-  await _saveProfile();
+  try {
+    await _saveProfile();
+  } catch (err) {
+    State.setProfile(prevProfile);
+    showToast('Profile NOT cleared: ' + ((err && err.message) || 'storage error'), 'error');
+    return;
+  }
 
   // Clear all profile form fields
   ['profileName','profileGSTIN','profileAddr','profilePhone','profileEmail',

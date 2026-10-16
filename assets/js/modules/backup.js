@@ -8,6 +8,7 @@ import * as State from '../core/state.js';
 import { restoreFromBackup, clearAllAppData, loadAllData } from '../core/storage.js';
 import { showToast } from '../ui/toast.js';
 import { closeModalDirect } from '../ui/navigation.js';
+import { downloadBlob } from '../utils/helpers.js';
 
 export function backupData() {
   const data = {
@@ -24,13 +25,10 @@ export function backupData() {
 
   const json = JSON.stringify(data, null, 2);
   const blob = new Blob([json], { type: 'application/json' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = `Ledgerix_Backup_${new Date().toLocaleDateString('en-IN').replace(/\//g, '-')}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
-  showToast('Backup downloaded!', 'success');
+  const name = `Ledgerix_Backup_${new Date().toLocaleDateString('en-IN').replace(/\//g, '-')}.json`;
+  // downloadBlob attaches the link to the DOM and delays revoking the URL (needed on Android)
+  if (downloadBlob(blob, name)) showToast('Backup downloaded!', 'success');
+  else showToast('Backup could not be downloaded on this browser', 'error');
 }
 
 function _stripImages(profile) {
@@ -45,11 +43,25 @@ export function restoreData(e) {
   if (!file) return;
   if (!file.name.endsWith('.json')) { showToast('Please select a JSON backup file!', 'error'); return; }
 
+  const input = e && e.target ? e.target : (e && e.files ? e : null);
   const reader = new FileReader();
   reader.onload = function (ev) {
     (async () => {
+      let data;
       try {
-        const data = JSON.parse(ev.target.result);
+        data = JSON.parse(ev.target.result);
+      } catch (err) {
+        showToast('This is not a valid Ledgerix backup file (could not read JSON).', 'error');
+        if (input) input.value = '';
+        return;
+      }
+      // Restoring REPLACES the current data — make that explicit before touching anything.
+      const n = (k) => (Array.isArray(data && data[k]) ? data[k].length : 0);
+      const msg = `Restore backup?\n\nThis will REPLACE the data on this device with the backup:\n` +
+        `• ${n('savedInvoices')} invoices, ${n('clients')} clients, ${n('products')} products\n\n` +
+        `Current: ${State.savedInvoices.length} invoices, ${State.clients.length} clients, ${State.products.length} products.`;
+      if (!confirm(msg)) { if (input) input.value = ''; return; }
+      try {
         await restoreFromBackup(data);
         await loadAllData();
 
@@ -67,8 +79,12 @@ export function restoreData(e) {
         showToast('Data restored!', 'success', true);
         closeModalDirect();
       } catch (err) {
-        showToast('Invalid or corrupt backup file!', 'error');
+        const quota = err && (err.name === 'QuotaExceededError' || err.code === 22);
+        showToast(quota ? 'Restore failed: browser storage is full. Your existing data was kept.'
+                        : 'Restore failed: ' + ((err && err.message) || 'invalid backup') + '. Your existing data was kept.', 'error');
         console.error('[Backup] Restore error:', err);
+      } finally {
+        if (input) input.value = '';
       }
     })();
   };

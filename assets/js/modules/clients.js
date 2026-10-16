@@ -13,6 +13,18 @@ import { showToast } from '../ui/toast.js';
 import { esc, validateGSTIN, validateEmail } from '../utils/helpers.js';
 import { switchTab } from '../ui/navigation.js';
 
+let _clientSaving = false;
+
+function _storageErr(err) {
+  if (err && (err.name === 'QuotaExceededError' || err.code === 22)) return 'browser storage is full. Export a backup and free some space.';
+  return (err && err.message) ? err.message : 'unknown storage error';
+}
+
+function _sameClient(a, b) {
+  return (a.name || '').trim().toLowerCase() === (b.name || '').trim().toLowerCase() &&
+         (a.gstin || '').trim().toUpperCase() === (b.gstin || '').trim().toUpperCase();
+}
+
 export function renderClients() {
   const list = document.getElementById('clientsList');
   if (!list) return;
@@ -69,8 +81,26 @@ export async function addNewClient() {
     return;
   }
 
-  State.clients.push({ id: nextId(), name, gstin, address: addr, phone, email });
-  await saveClients();
+  if (_clientSaving) return;
+  const candidate = { id: nextId(), name, gstin, address: addr, phone, email };
+  if (State.clients.some(c => _sameClient(c, candidate))) {
+    showToast('This client already exists (same name and GSTIN).', 'warning');
+    return;
+  }
+
+  _clientSaving = true;
+  const prev = State.clients;
+  try {
+    State.setClients([...prev, candidate]);
+    await saveClients();
+  } catch (err) {
+    State.setClients(prev);
+    console.error('[Clients] save failed:', err);
+    showToast('Client NOT saved: ' + _storageErr(err), 'error');
+    return;
+  } finally {
+    _clientSaving = false;
+  }
 
   ['newClientName','newClientGSTIN','newClientAddr','newClientPhone','newClientEmail']
     .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
@@ -87,8 +117,15 @@ function _validatePhoneLoose(phone) {
 
 export async function deleteClient(id) {
   if (!confirm('Delete this client?')) return;
-  State.setClients(State.clients.filter(c => c.id !== id));
-  await saveClients();
+  const prev = State.clients;
+  State.setClients(prev.filter(c => c.id !== id));
+  try {
+    await saveClients();
+  } catch (err) {
+    State.setClients(prev);
+    showToast('Client NOT deleted: ' + _storageErr(err), 'error');
+    return;
+  }
   renderClients();
   showToast('Client deleted', 'warning');
 }
@@ -163,15 +200,30 @@ export async function saveCurrentClient() {
     phone:   document.getElementById('invClientPhone')?.value.trim() || '',
     email:   document.getElementById('invClientEmail')?.value.trim() || '',
   };
-  const existing = State.clients.find(c => c.name.toLowerCase() === name.toLowerCase());
-  if (existing) {
-    Object.assign(existing, data);
-    showToast('Client updated!', 'success');
-  } else {
-    State.clients.push({ id: nextId(), ...data });
-    showToast('Client saved!', 'success');
+  // Same validation as the Clients tab — optional fields are only checked when filled in
+  if (data.gstin && !validateGSTIN(data.gstin)) { showToast('Invalid GSTIN format (e.g. 22AAAAA0000A1Z5) — leave blank if unknown', 'warning'); return; }
+  if (data.phone && !_validatePhoneLoose(data.phone)) { showToast('Invalid phone number', 'warning'); return; }
+  if (data.email && !validateEmail(data.email)) { showToast('Invalid email address', 'warning'); return; }
+  if (_clientSaving) return;
+
+  const prev      = State.clients;
+  const existing  = prev.find(c => c.name.toLowerCase() === name.toLowerCase());
+  _clientSaving = true;
+  try {
+    State.setClients(existing
+      ? prev.map(c => (c === existing ? { ...existing, ...data } : c))
+      : [...prev, { id: nextId(), ...data }]);
+    await saveClients();
+  } catch (err) {
+    State.setClients(prev);
+    console.error('[Clients] save failed:', err);
+    showToast('Client NOT saved: ' + _storageErr(err), 'error');
+    return;
+  } finally {
+    _clientSaving = false;
   }
-  await saveClients();
+  renderClients();
+  showToast(existing ? 'Client updated!' : 'Client saved!', 'success');   // only after the write succeeded
 }
 
 export function filterClientList() {

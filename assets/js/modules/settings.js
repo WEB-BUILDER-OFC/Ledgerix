@@ -14,13 +14,31 @@ import { savePINToStorage, removePIN } from '../core/security.js';
 import AppConfig from '../../../config/app.config.js';
 
 export function saveSettings() {
+  const gstS = document.getElementById('settingDefaultGST')?.value;
+  // Default GST 0 % is legitimate; only fall back to 18 when the box is empty / not a number.
+  const gst  = gstS === '' || gstS == null || !Number.isFinite(parseFloat(gstS)) ? 18 : parseFloat(gstS);
+  if (gst < 0 || gst > 100) { showToast('Default GST % must be between 0 and 100', 'warning'); return; }
+
+  const prev = { ...State.settings };
   Object.assign(State.settings, {
     currency:   document.getElementById('settingCurrency')?.value,
-    defaultGST: parseFloat(document.getElementById('settingDefaultGST')?.value) || 18,
+    defaultGST: gst,
     dateFormat: document.getElementById('settingDateFormat')?.value || 'DD/MM/YYYY',
     language:   document.getElementById('settingLanguage')?.value  || 'en',
   });
-  _save();
+  try {
+    _save();
+    // Read back so a silently-ignored write (blocked storage) cannot show "saved".
+    const stored = JSON.parse(localStorage.getItem(AppConfig.STORAGE_KEYS.SETTINGS) || '{}');
+    if (stored.defaultGST !== State.settings.defaultGST || stored.currency !== State.settings.currency) {
+      throw new Error('settings did not persist');
+    }
+  } catch (err) {
+    State.setSettings(prev);
+    console.error('[Settings] save failed:', err);
+    showToast('Settings NOT saved: ' + ((err && err.message) || 'storage error'), 'error');
+    return;
+  }
   showToast('Settings saved!', 'success');
 }
 

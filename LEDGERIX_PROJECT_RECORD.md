@@ -1,6 +1,6 @@
 # LEDGERIX — PROJECT RECORD
 **Single source of permanent memory and honest audit for the Ledgerix web application.**
-Last updated: 2026-10-05 | Build: v2.11.1 (release cleanup complete)
+Last updated: 2026-10-16 | Build: v2.11.4
 
 ---
 
@@ -16,7 +16,7 @@ It solves the problem of affordable, offline-capable GST invoice generation for 
 
 ## Current Version
 
-- **App version:** `v2.11.1` (as declared in `CACHE_NAME = 'ledgerix-v2.11.1-shell'`; `APP_VERSION` in `app.config.js`, the `index.html` splash/sidebar/footer labels and the README title were synchronised to `v2.11.1` during the v2.11.1 release cleanup, 2026-10-05)
+- **App version:** `v2.11.4` (as declared in `CACHE_NAME = 'ledgerix-v2.11.4-shell'`; `APP_VERSION` in `app.config.js`, the `index.html` splash/sidebar/footer labels, the PIN-overlay label and the README title all read `v2.11.4`)
 - **Status:** Functional single-file app. Core invoice lifecycle is production-quality. Several secondary features are solid. A few areas are basic or still maturing.
 - **Verification status:** All critical/non-critical bugs from the latest audit cycle have been fixed and statically verified. Browser/device verification pass has not yet been performed.
 
@@ -470,7 +470,7 @@ At larger scale (multiple users, shared devices, multi-branch businesses), the c
 
 **Cache update behavior:** When a new version is deployed, the SW activates automatically (`skipWaiting`) but cached content is only replaced after the next page load. The page sends a `SKIP_WAITING` message on detecting a waiting SW, which forces immediate activation. A full page reload then fetches updated assets.
 
-**Known risk:** If `CACHE_NAME` (currently `ledgerix-v2.11.1-shell`) is not bumped on deploy, old cached JS may be served to returning users. Cache name must be updated in `sw.js` on every meaningful code deploy.
+**Known risk:** If `CACHE_NAME` (currently `ledgerix-v2.11.4-shell`) is not bumped on deploy, old cached JS may be served to returning users. Cache name must be updated in `sw.js` on every meaningful code deploy.
 
 ---
 
@@ -1003,6 +1003,41 @@ All three security-critical files (`security.js`, `storage.js`, `state.js`) were
 - **Version labels synchronised to `v2.11.1`:** `config/app.config.js` (`APP_VERSION`), `index.html` (head comment, splash sub-label, sidebar sub-label, footer), `README.md` title, and the "Current Version" and cache-name statements in this record. Historical entries were left as written.
 - **Not changed (deliberately):** `security.js` PIN overlay still reads "v2.6 — Enter your PIN to continue" (security.js was out of scope for this cleanup); all PDF, SW, calculation, state, storage and preview code untouched.
 
+### [2026-10-14, v2.11.2] — Save Persistence Failure, PDF Image Handling, OCR Accuracy
+
+**Reported:** (1) logo/signature look poorer in the PDF than in the HTML preview; (2) Save Invoice / Save Client / PDF save and other save actions "do not work reliably"; (3) OCR of a screenshot of a Ledgerix invoice returned wrong vendor, bill number, items, rates and totals.
+
+**Issue 2 — root causes (each reproduced in Chromium before changing code):**
+1. **Encryption key was lost every time the browser/PWA was closed (critical).** `security.js` kept the install secret ONLY in `sessionStorage` (the project record always documented `localStorage`). A new session derived a different AES key, so `decStore()` failed and — because it returned the raw ciphertext envelope — profile, clients and invoices were loaded as an *object instead of an array/profile*. Every later Save then threw (`State.clients.push is not a function`) with no message, and anything written afterwards was encrypted with yet another key. Reproduced with a persistent browser profile: same-tab reload passed (which is all the v2.10/v2.11 "persistence across reload" tests exercised), a closed-and-reopened browser failed.
+2. Ciphertext was stored as a JSON array of byte values (~3.6x the size). Logo + signature at the 512 KB limit made the profile ~4.95 M characters, so Save Profile / later invoice saves hit the localStorage quota; the resulting exception was uncaught (no message).
+3. Handlers updated memory before persisting, did not catch storage errors, and showed success toasts regardless (`saveCurrentClient` toasted before `await saveClients()`); no re-entrancy guard (double tap = duplicate invoice/client); a saved invoice that was edited and saved again created a copy.
+4. `parseFloat(x) || 18` turned a chosen **0 % GST** into 18 % for products and the default-GST setting.
+5. Logo/signature uploads lived only in memory until "Save Profile" was pressed (lost on leaving the page).
+6. Backup/report downloads used a detached anchor and revoked the object URL immediately (unreliable on Android); PDF file names contained `/` (invoice numbers). Restore overwrote data without confirmation, dropped the on-device logo/signature, hid the real error, and could leave a half-restored data set.
+(The inline-handler bridge audit found all 60 `onclick`/`onchange` targets defined — no missing bridges.)
+
+**Issue 2 — fixes:** `security.js` (persistent install secret in `localStorage`; a secret already in the live session's `sessionStorage` is adopted so existing data stays readable; base64 `ct`, decoder accepts both old array and new base64; quota errors rethrown instead of plaintext fallback; undecryptable data returns a valid empty value and is preserved in `<key>__unreadable`, never overwritten); `storage.js` (typed parsing per collection, user warning when data could not be unlocked, restore snapshot + rollback, restore keeps local logo/signature, clear-all removes quarantined copies); `invoice.js`, `clients.js`, `products.js`, `profile.js`, `settings.js` (in-flight guards, validation, rollback + visible "NOT saved" error on failure, success only after the write, duplicate prevention, edit-in-place); `backup.js` (confirmation with counts, specific errors, input reset); `reports.js` / `helpers.js` (`downloadBlob`, `safeFilename`); `pdf.js` (blob built, validated as `%PDF-`, sanitised file name, `doc.save` fallback).
+**Trade-off (security):** the install secret now persists in `localStorage` (as originally documented), so the encryption protects against casual inspection/other apps reading exported storage but not against someone with full access to this browser profile. A non-extractable `CryptoKey` in IndexedDB would be stronger; not done (larger change). Data written by an earlier build in a session that is already closed has NO recoverable key — it is preserved in `*__unreadable` and the user is told; restoring from a backup is the recovery path.
+
+**Issue 1 — PDF images:** measured, not assumed. Old path embedded the original bytes (PNG/JPEG) or a natural-size canvas PNG (WEBP). With PDFium (Android's engine) and poppler on synthetic logo/signature images, ordinary upright PNG/JPEG logos rendered the same before and after — a general "downsampling blur" could NOT be reproduced. What WAS reproduced: (a) **EXIF-rotated phone photos** (JPEG with orientation tag) were embedded sideways/stretched (SSIM vs expected 0.04 before, 0.75-0.95 after); (b) PDF size 2-3x larger than necessary (signature 207 KB → 86 KB, logo 72 KB → 31 KB); (c) interlaced/16-bit/CMYK sources and alpha are handled inconsistently by jsPDF. Fix in `pdf.js` `_normaliseImg`: redraw once with stepped high-quality downscaling to 600 DPI for the box it occupies (36x24 mm logo, 48x16 mm signature), never upscaled (a low-resolution source cannot be improved), longest side ≤ 1600 px, aspect ratio preserved, alpha kept (PNG), large opaque PNG → JPEG q 0.92, PNG embedded with lossless `FAST` deflate. The user's own logo/signature files were not available, so their specific blur is unverified.
+
+**Issue 3 — OCR:** root causes (reproduced with Tesseract 5.3.4 on the supplied screenshot): 706-px-wide image fed to Tesseract unprocessed with automatic page mode (only 8 of 46 expected words recognised; white-on-navy header lost); old parser took the first line as vendor ("2026-09-30 PENDING"), the first "no/#" token as bill number and every line ending in a digit as an item; ₹ is often read as `7`/`%`/`'`; totals were never validated. New `ocr-parser.js` (pure module) + rewritten `ocr.js`: pre-processing (enlarge 2-3x, grey, unsharp, invert dark bands — measured 8/46 → 39/46 and 51/59 → 59/59; thresholding/CLAHE/auto-levels tested and NOT used), single-block page mode with word boxes, label/column based extraction (vendor above the date strip and Bill-To block, labelled dates matched by position, GSTIN with checksum, table rows from numeric structure so a lost header does not matter), amount-in-words parser, subtotal+tax+extras = grand total = words cross-checks, a misread-₹ leading digit is corrected ONLY when the bill's own arithmetic proves it (and flagged), review panel with warnings, outlined uncertain fields, confirmation before filling the invoice form when anything is uncertain, nothing is ever saved by OCR, text-layer **PDF support** (pdf.js, lazy-loaded from jsDelivr; exact text, no OCR; scanned PDFs fall back to OCR).
+
+**Verification:** see Part 16 (v2.11.2). **Version:** SW cache `ledgerix-v2.11.2-*`; `ocr-parser.js` added to `SHELL_ASSETS`.
+
+### [2026-10-15, v2.11.3] — Encryption Fail-Open Removed
+
+**Problem:** `encStore()` (security.js) wrote the value as PLAINTEXT for a sensitive key when Web Crypto was unavailable, and also for any non-quota encryption / key-derivation error — the caller then reported "saved". Review of v2.11.2 found this remaining after the persistence fix.
+**Fix (`security.js`, `storage.js`):** for keys in `AppConfig.ENCRYPTED_KEYS` there is no plaintext path any more. Missing Web Crypto / `getRandomValues`, key-derivation or `encrypt` failure, an install secret that cannot be persisted (or that changed in another tab), or an existing undecryptable ciphertext that could not be copied to `*__unreadable` all throw a `SecureStorageError` ("… nothing was saved"); quota errors surface unchanged as `QuotaExceededError`; non-sensitive keys are still written plain. The existing handlers (Save Invoice/Client/Profile, restore, draft autosave) already catch errors, roll back memory and show "NOT saved". Reading is unchanged for legacy data: plaintext still loads (also without Web Crypto); byte-array and v1 envelopes still decrypt; a ciphertext that cannot be decrypted (no Web Crypto, wrong key, unknown envelope version) returns the empty fallback — never the envelope — and is left untouched. A failing v1→v2 migration write no longer quarantines readable data; a stale safety copy of the same ciphertext is dropped once it decrypts again. README security section rewritten to describe the real behaviour (persistent install secret, what is/isn't encrypted, fail-closed, threat model). Version/SW cache bumped to v2.11.3 because deployed JS changed.
+**Verification (Chromium sandbox):** encryption suite 74/74 (success path, quota, crypto failures, UI features under failure + recovery, legacy/existing ciphertext) — the same suite fails 41/74 on v2.11.2 (4 of those are harness artefacts: the old build has no `SecureStorageError` class); save matrix 47/47; legacy 15/15; regression 73/73; parser 39/39; OCR create-flow 8/8. NOT verified on a real Android device.
+
+### [2026-10-16, v2.11.4] — Service-Worker Install Could Cache Stale Files (release gate)
+
+**Found by the release-gate upgrade test** (real Chromium, v2.11.2 installed, candidate "deployed", `Cache-Control: max-age=600` like GitHub Pages): when the update is installed within the HTTP-cache freshness window, `cache.addAll(SHELL_ASSETS)` read the browser's HTTP cache and stored stale v2.11.2 `index.html`, `app.config.js`, `storage.js` and `security.js` under the NEW cache name; the page kept showing the old version and ran the old (fail-open) `security.js`, pinned until the next cache bump. With `no-cache` headers the upgrade was correct.
+**Fix (`sw.js` install only):** each shell asset is added with `new Request(url, { cache: 'reload' })`. Activate/fetch logic, SHELL_ASSETS and error handling are unchanged. Version/cache bumped to v2.11.4.
+**Not fixed (documented):** a stale copy served by the hosting CDN edge for a few minutes after a deploy cannot be bypassed from the client — wait ~5 minutes after publishing before the first Android open.
+**Verification:** see Part 16 (v2.11.4 release gate).
+
 ## Full Live Feature Verification (v2.10, pre-fix)
 
 **Method:** Exhaustive code-path tracing of all JS modules, HTML structure, cross-module wiring, and DOM ID references. Every module's exports, imports, and bridge registrations were audited.
@@ -1173,6 +1208,33 @@ PDF suite detail (mock jsPDF): no character above 0xFF reaches `doc.text()` or t
 
 ---
 
+## v2.11.2 Regression & Verification (2026-10-14)
+
+**Environment:** Playwright Chromium (localhost, CDNs blocked, service worker blocked for OCR/matrix runs), native Tesseract 5.3.4 behind a tesseract.js-shaped stub (the real tesseract.js 4.1.1 from the CDN was NOT run), pdf.js 5.6.205 legacy build served locally under the CDN URL, PDFium (pypdfium2) and poppler for PDF rendering. All tests ran against the extracted release ZIP as well as the working tree.
+
+| Suite | Result | What it proves |
+|---|---|---|
+| Save/persistence matrix (11 sections, real UI clicks, real encrypted localStorage, real downloads, simulated quota failures, browser closed & reopened) | **47/47 PASS** on v2.11.2; original build: **~30 failures** on the same matrix (it also crashed mid-run) | each save action persists, survives close/reopen, shows validation/errors, never reports false success, no duplicates |
+| Legacy-data compatibility | **15/15 PASS** | old byte-array ciphertext readable; live-session secret adopted; plaintext legacy loads; lost-key ciphertext preserved + user told + new saves safe; profile with two ~700 KB images 4.95 M → 1.85 M characters |
+| OCR end-to-end (13 fixtures incl. the supplied screenshot, clean/blurred/noisy/rotated/cropped/no-GSTIN/Indian-format/non-invoice/text PDF/scanned PDF) | **27/27 assertions PASS** | exact reads where the image allows, flagged where it does not, nothing invented |
+| OCR create-flow | **8/8 PASS** | confirmation when uncertain; cancel creates nothing; form filled but never saved; reconciled charges carried over |
+| Parser unit tests (Indian/Western/European numbers, dates, GSTIN checksum, words, receipts, conflicts) | **39/39 PASS** | |
+| PDF image before/after (6 images × 3 zoom levels × PDFium + poppler) | EXIF case fixed; others equal or slightly better; PDFs 1.4-7x smaller | see Part 15 |
+| Existing 73-check regression (calculations, preview, history, dashboard, reports, PIN, PDF geometry, SW purge, WEBP) | **73/73 PASS** (one expectation updated for the new image path) | no regressions |
+
+**Honest limits of this verification:** real jsPDF/autoTable output was not produced (CDN blocked) — the image fix was verified by embedding the exact bytes the app hands to jsPDF into PDFs with pdf-lib; real tesseract.js 4.1.1 / tessdata_fast was not run (native Tesseract 5.3.4 differs in accuracy); the real jsDelivr download of pdf.js, Tesseract and fonts was not exercised; Android download behaviour, share targets, print, PWA install and offline mode were not tested on a device.
+
+---
+
+## v2.11.4 Release-Gate Verification (2026-10-16)
+
+All suites were re-run against the EXTRACTED release ZIP (Chromium sandbox; CDNs blocked; native Tesseract 5.3.4 stub; pdf.js served locally under its CDN URL): package/static checks (33 files, 26 JS modules parse, all imports and SHELL_ASSETS resolve, icons 192/512 valid, versions consistent, one record, no stray files) — OK; encryption fail-closed 74/74; save matrix 47/47; legacy data 15/15; existing regression 73/73; parser unit 39/39; OCR fixtures 27/27; OCR create-flow 8/8; handler bridge audit 60/60; PDF image pipeline (EXIF case SSIM 0.20 → 0.63, PDF 108 KB → 76 KB).
+**Service-worker upgrade test (real Chromium, SW enabled, prior build installed, candidate "deployed", then reload):** v2.11.2→v2.11.4 and v2.11.3→v2.11.4, each with `no-cache` and `max-age=600` headers = 4 × 9/9 PASS (page auto-reloads to the new version, old caches removed, every cached shell file byte-identical to the deployed file, existing encrypted data intact, saving works). The same test on v2.11.3 with `max-age=600` FAILED (stale index.html/app.config.js/storage.js/security.js pinned under the new cache name) — the reason v2.11.4 exists.
+**Measured, not changed:** OCR pre-processing 0.9–1.1 s and +180–280 MB browser memory on typical images (+500 MB for a 48 MP photo) on desktop Chromium — watch for tab reloads on low-RAM phones with very large photos.
+**Not testable here (needs the Android phone):** installed-PWA cold start, real jsPDF/autoTable output, real tesseract.js 4.1.1 and pdf.js CDN downloads, Android download behaviour, PIN keyboard flow on a phone.
+
+---
+
 # PART 17 — IMPORTANT PROJECT DECISIONS
 
 ## Local-First Architecture
@@ -1295,9 +1357,17 @@ The pattern `State.profile.fy || currentFY()` is deliberate. Saved FY must alway
 
 ## Overall Condition
 
-**Functionally sound for small Indian business GST billing.** Core invoice lifecycle (create, preview, PDF, share, save, load) is complete and correct. Security architecture is solid for local-only use. All confirmed bugs from the v2.10 fix cycle and browser verification pass have been fixed and browser-verified. One critical browser-only bug (`State.invoiceCounter++`) was discovered and fixed during the browser pass. In v2.11, the invoice/PDF presentation was significantly improved — professional navy/gold layout, business logo, digital signature, and Ledgerix watermark added to both HTML preview and jsPDF output. HTML preview is browser-verified; PDF rendering is pending real-device test with jsPDF CDN accessible.
+**Functionally sound for small Indian business GST billing.** Core invoice lifecycle (create, preview, PDF, share, save, load) is complete and correct. Security architecture is solid for local-only use. All confirmed bugs from the v2.10 fix cycle and browser verification pass have been fixed and browser-verified. One critical browser-only bug (`State.invoiceCounter++`) was discovered and fixed during the browser pass. In v2.11, the invoice/PDF presentation was significantly improved — professional navy/gold layout, business logo, digital signature, and Ledgerix watermark added to both HTML preview and jsPDF output. HTML preview is browser-verified; PDF layout/money rendering was verified on a real Android device in v2.11.1. v2.11.2 fixed a critical persistence bug (encryption key lost whenever the app was closed), save-error handling, PDF image handling and OCR accuracy — verified in the sandbox only; real-device checks of those changes are pending.
 
 ## Browser-Verified Working Areas
+
+### v2.11.2 — Playwright Chromium (sandbox), 2026-10-14
+
+- Save Invoice / Save Client (both forms) / Save Product / Save Profile / Save Settings / draft / PDF download / Backup / Restore / report exports — action-by-action matrix 47/47, including **closing and reopening the browser** (the v2.10/v2.11 "persistence across reload" checks only covered same-tab reloads and missed the lost-key bug)
+- Legacy data (old encrypted format, plaintext, lost-key ciphertext) 15/15
+- OCR pipeline with real Tesseract 5.3.4 engine + real pdf.js: 27/27 fixture assertions; parser 39/39 unit; create-flow 8/8
+- PDF image pre-processing verified with PDFium + poppler (EXIF orientation fixed; smaller PDFs)
+- Existing 73-check regression 73/73
 
 ### v2.10 — Playwright Chromium, 2026-09-16
 
@@ -1354,16 +1424,17 @@ The pattern `State.profile.fy || currentFY()` is deliberate. Saved FY must alway
 
 These could not be tested in the sandbox and genuinely require a real deployment:
 
-- ~~PDF download and content quality~~ — VERIFIED on real Android (v2.11.1, per user screenshot); iOS/desktop PDF viewers not tested
+- ~~PDF download and content quality~~ — layout/money VERIFIED on real Android (v2.11.1); v2.11.2 download path (blob + safe file name), logo/signature re-sampling and real jsPDF output on device NOT yet verified; iOS/desktop PDF viewers not tested
 - Print dialog output (requires browser with display)
 - WhatsApp/Email/Telegram share (requires device apps)
-- OCR scanning accuracy (requires Tesseract CDN + real bill image)
+- OCR scanning accuracy with the real tesseract.js 4.1.1 engine, real jsDelivr downloads (Tesseract, pdf.js) and real phone photos of printed Indian bills — sandbox used native Tesseract 5.3.4 on rendered/degraded fixtures
 - PWA installation prompt (requires HTTPS + Android/desktop browser)
 - Service Worker registration on HTTPS — v2.11.1 verified on localhost; real-device activation inferred from fixed PDF (Cache Storage not inspected)
 - Offline behavior on installed PWA (requires SW cache populated over HTTPS)
 - iOS PWA behavior and SW compatibility
 - Logo/signature file upload (FileReader + file picker) — WEBP upload verified in sandbox via file input; PDF rendering of both verified on Android
-- Backup restore from file (file picker)
+- Backup restore from file on a phone's file picker (confirmation, rollback and logo preservation verified in the sandbox)
+- Closing/reopening the installed PWA on a real device (verified in Chromium by closing the browser; Android PWA cold-start not tested)
 - Mobile responsive layout on real narrow-viewport device
 
 ## Known Limitations (Unchanged)
@@ -1372,7 +1443,9 @@ These could not be tested in the sandbox and genuinely require a real deployment
 - localStorage fragility: clear browser = lose all data without backup
 - No true XLSX export — exports tab-separated `.xls` text, not XLSX binary
 - Report "Export PDF" = `window.print()` — not a true structured PDF of the report
-- OCR accuracy is moderate at best on real Indian printed bills
+- OCR remains best-effort: low-resolution photos, handwriting and skewed/crumpled bills are flagged for review but may still be misread; a text-based PDF is exact, a screenshot of a PDF is not. Data written by an earlier build in an already-closed session cannot be decrypted (preserved in `*__unreadable`; restore from a backup)
+- The install secret is stored in `localStorage` (documented design) — protects against casual inspection, not against full access to the browser profile
+- Worst-case OCR time on a pure-noise image was ~55 s in the sandbox (native engine); real tesseract.js in a phone browser will be slower
 - Inventory stock field is a data field only — not decremented on invoice save
 - Fonts and icons require CDN (cached by SW after first load)
 - Currency options in Settings UI (INR, $, €) do not match full symbol map in `formatMoney()` (INR, USD, EUR, GBP, AED, SGD) — non-blocking
@@ -1381,7 +1454,7 @@ These could not be tested in the sandbox and genuinely require a real deployment
 - Side "Ledgerix" watermark sits ~12 mm from the page edge instead of 4 mm (jsPDF rotated center-align) — cosmetic
 - `—` placeholder (U+2014) for empty meta fields in the PDF not exercised on a device
 - PWA icons regenerated in the v2.11.1 release cleanup (navy/gold "L"); install prompt, home-screen and maskable rendering on a real device not tested
-- PIN overlay text in `security.js` still reads "v2.6" (security.js intentionally untouched in the release cleanup); all other version labels read v2.11.1
+- All version labels read v2.11.2
 
 ## Known Risks (Unchanged)
 
@@ -1426,5 +1499,5 @@ These could not be tested in the sandbox and genuinely require a real deployment
 
 **The application is functionally complete for small Indian business local billing.** All core features work. The HTML invoice preview and the Android PDF output are verified. Remaining real-device items are the PWA/offline/iOS/print/OCR/share/restore checks listed above (the PDF items in the list above were completed for Android in v2.11.1).
 
-**v2.11.1 — BROWSER + REAL ANDROID PDF VERIFIED**
+**v2.11.4 — BROWSER (SANDBOX) VERIFIED; REAL-DEVICE VERIFICATION OF THE v2.11.2–v2.11.4 FIXES PENDING** (v2.11.1 PDF layout/money rendering remains real-Android verified)
 

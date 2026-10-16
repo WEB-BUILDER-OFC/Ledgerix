@@ -13,6 +13,8 @@ import { showToast } from '../ui/toast.js';
 import { esc, formatMoney, today, addDays, numberToWords, currentFY } from '../utils/helpers.js';
 
 let _autoSaveTimer = null;
+let _saving        = false;   // blocks double-tap / re-entrant saves
+let _editingId     = null;    // id of the saved invoice currently loaded in the form
 
 // ── Item management ───────────────────────────────────────────────────────────
 
@@ -112,7 +114,7 @@ export function autoSaveInvoice() {
       notes:         document.getElementById('invNotes')?.value,
       items:         State.items,
     };
-    saveDraft(draft);
+    Promise.resolve(saveDraft(draft)).catch(e => console.warn('[Invoice] draft not saved:', e));
   }, AppConfig.AUTOSAVE_DEBOUNCE_MS);
 }
 
@@ -173,30 +175,67 @@ export function getInvoiceData() {
 // ── Save invoice ───────────────────────────────────────────────────────────────
 
 export async function saveInvoice() {
+  if (_saving) return;                       // ignore a second tap while a save is in flight
   const data = getInvoiceData();
   if (!data) return;
 
-  // Duplicate number check
-  const dupe = State.savedInvoices.find(i => i.invNum === data.invNum);
-  if (dupe && !confirm(`Invoice ${data.invNum} already exists. Save as new copy anyway?`)) return;
+  // The invoice loaded for editing (or just saved) is UPDATED in place — never duplicated.
+  const editIdx = _editingId == null ? -1 : State.savedInvoices.findIndex(i => i.id === _editingId);
+  const updating = editIdx >= 0 && State.savedInvoices[editIdx].invNum === data.invNum;
 
-  const invoice = { id: nextId(), ...data, savedAt: new Date().toLocaleString() };
-  State.savedInvoices.unshift(invoice);
-  await saveInvoices();
+  if (!updating) {
+    const dupe = State.savedInvoices.find(i => i.invNum === data.invNum);
+    if (dupe && !confirm(`Invoice ${data.invNum} already exists. Save as new copy anyway?`)) return;
+  }
 
-  State.setInvoiceCounter(State.invoiceCounter + 1);
-  saveInvoiceCounter();          // centralised — no direct localStorage access
-  clearTimeout(_autoSaveTimer);
-  clearDraft();
+  _saving = true;
+  const prevInvoices = State.savedInvoices;
+  const prevCounter  = State.invoiceCounter;
+  try {
+    const savedAt = new Date().toLocaleString();
+    let invoice;
+    if (updating) {
+      invoice = { ...prevInvoices[editIdx], ...data, id: prevInvoices[editIdx].id, savedAt };
+      State.setSavedInvoices(prevInvoices.map((i, n) => (n === editIdx ? invoice : i)));
+    } else {
+      invoice = { id: nextId(), ...data, savedAt };
+      State.setSavedInvoices([invoice, ...prevInvoices]);
+    }
+    await saveInvoices();                    // throws if the browser refuses the write
 
-  showToast('Invoice saved!', 'success', true);
-  import('./dashboard.js').then(m => m.updateDashboard());
+    if (!updating) {
+      State.setInvoiceCounter(State.invoiceCounter + 1);
+      saveInvoiceCounter();                  // centralised — no direct localStorage access
+    }
+    _editingId = invoice.id;
+    clearTimeout(_autoSaveTimer);
+    clearDraft();
+
+    showToast(updating ? 'Invoice updated!' : 'Invoice saved!', 'success', true);
+    import('./dashboard.js').then(m => m.updateDashboard());
+  } catch (err) {
+    // Nothing was persisted — undo the in-memory change so the UI never shows a false success.
+    State.setSavedInvoices(prevInvoices);
+    State.setInvoiceCounter(prevCounter);
+    console.error('[Invoice] save failed:', err);
+    showToast('Invoice NOT saved: ' + _storageErrorMessage(err), 'error');
+  } finally {
+    _saving = false;
+  }
+}
+
+function _storageErrorMessage(err) {
+  if (err && (err.name === 'QuotaExceededError' || err.code === 22)) {
+    return 'browser storage is full. Export a backup and delete old invoices or large images.';
+  }
+  return (err && err.message) ? err.message : 'unknown storage error';
 }
 
 // ── Reset invoice ──────────────────────────────────────────────────────────────
 
 export function resetInvoice() {
   clearTimeout(_autoSaveTimer);
+  _editingId = null;
   State.setItems([]);
   renderItems();
   clearDraft();
@@ -262,6 +301,7 @@ export function filterInvoices() { renderInvoicesList(); }
 export function loadSavedInvoice(id) {
   const inv = State.savedInvoices.find(i => i.id === id);
   if (!inv) return;
+  _editingId = inv.id;                       // Save will now update this invoice, not create a copy
 
   import('../ui/navigation.js').then(m => m.switchTab('invoice'));
 
@@ -292,8 +332,16 @@ export function loadSavedInvoice(id) {
 
 export async function deleteSavedInvoice(id) {
   if (!confirm('Delete this invoice?')) return;
-  State.setSavedInvoices(State.savedInvoices.filter(i => i.id !== id));
-  await saveInvoices();
+  const prev = State.savedInvoices;
+  State.setSavedInvoices(prev.filter(i => i.id !== id));
+  try {
+    await saveInvoices();
+  } catch (err) {
+    State.setSavedInvoices(prev);
+    showToast('Invoice NOT deleted: ' + _storageErrorMessage(err), 'error');
+    return;
+  }
+  if (_editingId === id) _editingId = null;
   renderInvoicesList();
   import('./dashboard.js').then(m => m.updateDashboard());
   showToast('Invoice deleted!', 'warning', true);

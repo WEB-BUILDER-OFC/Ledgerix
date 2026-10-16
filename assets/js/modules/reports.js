@@ -6,7 +6,7 @@
 
 import * as State from '../core/state.js';
 import { showToast } from '../ui/toast.js';
-import { formatMoney, formatDate, getWeekStart, getWeekEnd, getMonthStart,
+import { downloadBlob, formatMoney, formatDate, getWeekStart, getWeekEnd, getMonthStart,
          getMonthEnd, getYearStart, getYearEnd, today, csvField, esc } from '../utils/helpers.js';
 
 export function generateReport() {
@@ -218,8 +218,8 @@ export function exportReportCSV() {
   [...table.querySelectorAll('tfoot tr')].forEach(tr => {
     csv += [...tr.querySelectorAll('td')].map(td => csvField(td.textContent)).join(',') + '\n';
   });
-  _download(csv, `Report_${State.currentReportData.type}_${State.currentReportData.fromDate}.csv`, 'text/csv');
-  showToast('Report exported as CSV!', 'success');
+  if (_download(csv, `Report_${State.currentReportData.type}_${State.currentReportData.fromDate}.csv`, 'text/csv')) showToast('Report exported as CSV!', 'success');
+  else showToast('Export failed on this browser', 'error');
 }
 
 export function exportReportExcel() {
@@ -230,8 +230,8 @@ export function exportReportExcel() {
   [...table.querySelectorAll('thead tr, tbody tr, tfoot tr')].forEach(tr => {
     tsv += [...tr.querySelectorAll('th,td')].map(td => td.textContent).join('\t') + '\n';
   });
-  _download(tsv, `Report_${State.currentReportData.type}_${State.currentReportData.fromDate}.xls`, 'application/vnd.ms-excel');
-  showToast('Report exported as Excel!', 'success');
+  if (_download(tsv, `Report_${State.currentReportData.type}_${State.currentReportData.fromDate}.xls`, 'application/vnd.ms-excel')) showToast('Report exported as Excel!', 'success');
+  else showToast('Export failed on this browser', 'error');
 }
 
 export function printReport() {
@@ -243,8 +243,5 @@ export function printReport() {
 
 function _download(content, filename, mimeType) {
   const blob = new Blob([content], { type: mimeType + ';charset=utf-8;' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href = url; a.download = filename; a.click();
-  URL.revokeObjectURL(url);
+  return downloadBlob(blob, filename);
 }

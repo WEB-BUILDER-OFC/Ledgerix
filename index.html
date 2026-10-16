@@ -7,7 +7,7 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <!-- App version: v2.11.1 — bump this comment on every deploy to break GitHub Pages edge cache -->
+    <!-- App version: v2.11.4 — bump this comment on every deploy to break GitHub Pages edge cache -->
     <meta name="theme-color" content="#0a1628">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -105,7 +105,7 @@
     <div class="splash-screen" id="splashScreen">
         <div class="splash-logo">L</div>
         <div class="splash-text">Ledgerix</div>
-        <div class="splash-sub">v2.11.1 Business Suite</div>
+        <div class="splash-sub">v2.11.4 Business Suite</div>
         <div class="splash-loader"><div class="splash-loader-fill"></div></div>
     </div>
 
@@ -152,7 +152,7 @@
             <div class="logo-icon">L</div>
             <div>
                 <div class="logo-text">Ledgerix</div>
-                <div class="logo-sub">v2.11.1 Business Suite</div>
+                <div class="logo-sub">v2.11.4 Business Suite</div>
             </div>
         </div>
         <div class="header-actions">
@@ -453,9 +453,9 @@
                             <div class="ocr-upload-zone" id="ocrUploadZone" onclick="document.getElementById('ocrFileInput').click()">
                                 <i class="fas fa-cloud-upload-alt"></i>
                                 <h3 style="color:var(--gold);margin-bottom:0.3rem">Click to Upload Bill Image</h3>
-                                <p style="color:var(--gray);font-size:0.8rem">Supports JPG, PNG, WEBP</p>
+                                <p style="color:var(--gray);font-size:0.8rem">Supports JPG, PNG, WEBP or PDF</p>
                                 <img id="ocrPreviewImg" class="ocr-preview-img" alt="Preview">
-                                <input type="file" id="ocrFileInput" accept="image/*" style="display:none" onchange="handleOCRUpload(event)">
+                                <input type="file" id="ocrFileInput" accept="image/*,application/pdf" style="display:none" onchange="handleOCRUpload(event)">
                             </div>
                             <div class="ocr-progress-wrap" id="ocrProgressWrap">
                                 <div class="ocr-progress-bar" id="ocrProgressBar"></div>
@@ -1272,7 +1272,7 @@
             </div>
 
             <footer class="footer">
-                <p><i class="fas fa-heart" style="color:var(--danger)"></i> Made for Indian Small Businesses | Ledgerix v2.11.1</p>
+                <p><i class="fas fa-heart" style="color:var(--danger)"></i> Made for Indian Small Businesses | Ledgerix v2.11.4</p>
                 <p style="margin-top:0.2rem;font-size:0.7rem">All data stored locally. Works offline. PWA Ready.</p>
             </footer>
         </main>

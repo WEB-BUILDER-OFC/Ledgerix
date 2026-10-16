@@ -40,17 +40,44 @@ export function renderProducts() {
       </div>`).join('');
 }
 
+function _storageErr(err) {
+  if (err && (err.name === 'QuotaExceededError' || err.code === 22)) return 'browser storage is full. Export a backup and free some space.';
+  return (err && err.message) ? err.message : 'unknown storage error';
+}
+
 export function addNewProduct() {
   const name  = document.getElementById('newProductName')?.value.trim();
   const hsn   = document.getElementById('newProductHSN')?.value.trim()  || '';
-  const rate  = parseFloat(document.getElementById('newProductRate')?.value)  || 0;
-  const gst   = parseFloat(document.getElementById('newProductGST')?.value)   || 18;
-  const stock = parseInt(document.getElementById('newProductStock')?.value, 10) || 0;
+  const rateS = document.getElementById('newProductRate')?.value;
+  const gstS  = document.getElementById('newProductGST')?.value;
+  const stockS = document.getElementById('newProductStock')?.value;
 
   if (!name) { showToast('Product name is required', 'warning'); return; }
 
-  State.products.push({ id: nextId(), name, hsn, rate, gst, stock });
-  saveProducts();
+  const rate  = rateS === '' || rateS == null ? 0 : parseFloat(rateS);
+  // GST 0 % is a valid rate (exempt goods) — the old `|| 18` turned it into 18 %.
+  const gst   = gstS === '' || gstS == null ? 18 : parseFloat(gstS);
+  const stock = stockS === '' || stockS == null ? 0 : parseInt(stockS, 10);
+
+  if (!Number.isFinite(rate) || rate < 0)            { showToast('Rate must be a number of 0 or more', 'warning'); return; }
+  if (!Number.isFinite(gst) || gst < 0 || gst > 100) { showToast('GST % must be between 0 and 100', 'warning'); return; }
+  if (!Number.isFinite(stock) || stock < 0)          { showToast('Stock must be 0 or more', 'warning'); return; }
+
+  if (State.products.some(p => p.name.trim().toLowerCase() === name.toLowerCase() && (p.hsn || '').trim() === hsn)) {
+    showToast('This product already exists (same name and HSN).', 'warning');
+    return;
+  }
+
+  const prev = State.products;
+  try {
+    State.setProducts([...prev, { id: nextId(), name, hsn, rate, gst, stock }]);
+    saveProducts();
+  } catch (err) {
+    State.setProducts(prev);
+    console.error('[Products] save failed:', err);
+    showToast('Product NOT saved: ' + _storageErr(err), 'error');
+    return;
+  }
 
   ['newProductName','newProductHSN','newProductRate','newProductGST','newProductStock']
     .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
@@ -61,8 +88,13 @@ export function addNewProduct() {
 
 export function deleteProduct(id) {
   if (!confirm('Delete this product?')) return;
-  State.setProducts(State.products.filter(p => p.id !== id));
-  saveProducts();
+  const prev = State.products;
+  State.setProducts(prev.filter(p => p.id !== id));
+  try { saveProducts(); } catch (err) {
+    State.setProducts(prev);
+    showToast('Product NOT deleted: ' + _storageErr(err), 'error');
+    return;
+  }
   renderProducts();
   showToast('Product deleted', 'warning');
 }

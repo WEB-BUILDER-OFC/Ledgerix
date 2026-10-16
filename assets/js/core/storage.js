@@ -11,12 +11,27 @@
 'use strict';
 
 import AppConfig from '../../../config/app.config.js';
-import { encStore, decStore } from './security.js';
+import { encStore, decStore, resetUnreadableTracking } from './security.js';
 import * as State from './state.js';
+import { showToast } from '../ui/toast.js';
 
 const K = AppConfig.STORAGE_KEYS;
 
 // ── Load all data from localStorage into State ────────────────────────────────
+
+// Parses stored JSON and guarantees the expected shape. A corrupt or wrong-typed value
+// yields the empty default (never an object where the app expects an array).
+function _parseAs(raw, kind, label) {
+  try {
+    const v = JSON.parse(raw);
+    if (kind === 'array'  && Array.isArray(v)) return v;
+    if (kind === 'object' && v && typeof v === 'object' && !Array.isArray(v)) return v;
+    console.warn('[Storage] unexpected shape for', label);
+  } catch (e) {
+    console.warn('[Storage] could not parse', label, e);
+  }
+  return kind === 'array' ? [] : {};
+}
 
 export async function loadAllData() {
   try {
@@ -25,16 +40,22 @@ export async function loadAllData() {
     const rawProfile  = await decStore(K.PROFILE,  '{}');
     const rawDraft    = await decStore(K.INVOICE_DRAFT, null);
 
-    const rawNotifs  = JSON.parse(localStorage.getItem(K.NOTIFICATIONS) || '[]');
+    const rawNotifs  = _parseAs(localStorage.getItem(K.NOTIFICATIONS) || '[]', 'array', 'notifications');
     const validTypes = AppConfig.NOTIF_TYPES;
 
-    State.setClients(JSON.parse(rawClients));
-    State.setProducts(JSON.parse(localStorage.getItem(K.PRODUCTS) || '[]'));
-    State.setSavedInvoices(JSON.parse(rawInvoices));
-    State.setProfile(JSON.parse(rawProfile));
-    State.setSettings(JSON.parse(localStorage.getItem(K.SETTINGS) || '{}'));
-    State.setInvoiceCounter(parseInt(localStorage.getItem(K.INV_COUNTER) || '1'));
-    State.setCalcHistory(JSON.parse(localStorage.getItem(K.CALC_HISTORY) || '[]'));
+    State.setClients(_parseAs(rawClients, 'array', 'clients'));
+    State.setProducts(_parseAs(localStorage.getItem(K.PRODUCTS) || '[]', 'array', 'products'));
+    State.setSavedInvoices(_parseAs(rawInvoices, 'array', 'invoices'));
+    State.setProfile(_parseAs(rawProfile, 'object', 'profile'));
+    State.setSettings(_parseAs(localStorage.getItem(K.SETTINGS) || '{}', 'object', 'settings'));
+    State.setInvoiceCounter(parseInt(localStorage.getItem(K.INV_COUNTER) || '1', 10) || 1);
+    State.setCalcHistory(_parseAs(localStorage.getItem(K.CALC_HISTORY) || '[]', 'array', 'calc history'));
+
+    // Tell the user (once per load) if encrypted data from an old session could not be unlocked.
+    const lost = AppConfig.ENCRYPTED_KEYS.filter(k => k !== K.INVOICE_DRAFT && localStorage.getItem(k + '__unreadable'));
+    if (lost.length) {
+      showToast('Some saved data from an earlier session could not be unlocked. A copy was kept — restore from a backup if needed.', 'warning', true);
+    }
 
     // Sanitise notification types
     State.setNotifications(rawNotifs.map(n => ({
@@ -176,6 +197,8 @@ export function isReturningUser() {
 export function clearAllAppData() {
   const appKeys = Object.values(K);
   appKeys.forEach(k => localStorage.removeItem(k));
+  AppConfig.ENCRYPTED_KEYS.forEach(k => localStorage.removeItem(k + '__unreadable'));
+  resetUnreadableTracking();
   Object.keys(localStorage)
     .filter(k => k.startsWith(AppConfig.STORAGE_KEYS.REMINDERS_PREFIX))
     .forEach(k => localStorage.removeItem(k));
@@ -204,11 +227,31 @@ export async function restoreFromBackup(data) {
     return out;
   }
 
-  if (data.clients)       await encStore(K.CLIENTS,    JSON.stringify(data.clients));
-  if (data.products)      localStorage.setItem(K.PRODUCTS, JSON.stringify(data.products));
-  if (data.savedInvoices) await encStore(K.INVOICES,   JSON.stringify(data.savedInvoices));
-  if (data.profile)       await encStore(K.PROFILE,    JSON.stringify(pickKeys(data.profile, AppConfig.ALLOWED_PROFILE_KEYS)));
-  if (data.settings)      localStorage.setItem(K.SETTINGS, JSON.stringify(pickKeys(data.settings, AppConfig.ALLOWED_SETTINGS_KEYS)));
-  if (data.invoiceCounter) localStorage.setItem(K.INV_COUNTER, data.invoiceCounter);
-  if (data.notifications) localStorage.setItem(K.NOTIFICATIONS, JSON.stringify(data.notifications));
+  // Snapshot everything we are about to overwrite so a mid-way failure (e.g. storage
+  // quota) cannot leave the user with a half-restored, inconsistent data set.
+  const touched = [K.CLIENTS, K.PRODUCTS, K.INVOICES, K.PROFILE, K.SETTINGS, K.INV_COUNTER, K.NOTIFICATIONS];
+  const snapshot = {};
+  touched.forEach(k => { snapshot[k] = localStorage.getItem(k); });
+
+  try {
+    if (data.clients)       await encStore(K.CLIENTS,    JSON.stringify(data.clients));
+    if (data.products)      localStorage.setItem(K.PRODUCTS, JSON.stringify(data.products));
+    if (data.savedInvoices) await encStore(K.INVOICES,   JSON.stringify(data.savedInvoices));
+    if (data.profile) {
+      // Backups intentionally omit logo/signature. Keep the ones already on this device
+      // instead of silently deleting them.
+      const incoming = pickKeys(data.profile, AppConfig.ALLOWED_PROFILE_KEYS);
+      if (!incoming.logo && State.profile && State.profile.logo)            incoming.logo = State.profile.logo;
+      if (!incoming.signature && State.profile && State.profile.signature)  incoming.signature = State.profile.signature;
+      await encStore(K.PROFILE, JSON.stringify(incoming));
+    }
+    if (data.settings)      localStorage.setItem(K.SETTINGS, JSON.stringify(pickKeys(data.settings, AppConfig.ALLOWED_SETTINGS_KEYS)));
+    if (data.invoiceCounter) localStorage.setItem(K.INV_COUNTER, data.invoiceCounter);
+    if (data.notifications) localStorage.setItem(K.NOTIFICATIONS, JSON.stringify(data.notifications));
+  } catch (e) {
+    touched.forEach(k => {
+      try { snapshot[k] === null ? localStorage.removeItem(k) : localStorage.setItem(k, snapshot[k]); } catch (_) {}
+    });
+    throw e;
+  }
 }

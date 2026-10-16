@@ -34,7 +34,7 @@ import { openGlobalSearch, closeGlobalSearch, performGlobalSearch } from './modu
 import { backupData, restoreData, clearAllData, setupOfflineDetection } from './modules/backup.js';
 import { downloadPDF, previewInvoice, closePreview } from './modules/pdf.js';
 import { handleOCRUpload, startOCRScan, createInvoiceFromOCR, addOCRItem,
-         removeOCRItem, updateOCRItem, clearOCR }   from './modules/ocr.js';
+         removeOCRItem, updateOCRItem, clearOCR, getLastOCRResult }   from './modules/ocr.js';
 import { today, addDays }       from './utils/helpers.js';
 import AppConfig               from '../../config/app.config.js';
 
@@ -66,7 +66,7 @@ window._ledgerix = {
   search:   { openGlobalSearch, closeGlobalSearch, performGlobalSearch },
   backup:   { backupData, restoreData, clearAllData },
   ocr:      { handleOCRUpload, startOCRScan, createInvoiceFromOCR, addOCRItem,
-              removeOCRItem, updateOCRItem, clearOCR },
+              removeOCRItem, updateOCRItem, clearOCR, getLastOCRResult },
 };
 
 // ── Flat shims for HTML onclick compatibility ─────────────────────────────────
