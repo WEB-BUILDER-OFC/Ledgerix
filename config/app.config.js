@@ -7,7 +7,7 @@
 
 const AppConfig = {
   APP_NAME:    'Ledgerix',
-  APP_VERSION: 'v2.11.4',
+  APP_VERSION: 'v2.11.5',
   APP_TAGLINE: 'Business Management & GST Billing',
 
   // Storage keys

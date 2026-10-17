@@ -1,6 +1,6 @@
 # LEDGERIX — PROJECT RECORD
 **Single source of permanent memory and honest audit for the Ledgerix web application.**
-Last updated: 2026-10-16 | Build: v2.11.4
+Last updated: 2026-10-17 | Build: v2.11.5
 
 ---
 
@@ -16,7 +16,7 @@ It solves the problem of affordable, offline-capable GST invoice generation for 
 
 ## Current Version
 
-- **App version:** `v2.11.4` (as declared in `CACHE_NAME = 'ledgerix-v2.11.4-shell'`; `APP_VERSION` in `app.config.js`, the `index.html` splash/sidebar/footer labels, the PIN-overlay label and the README title all read `v2.11.4`)
+- **App version:** `v2.11.5` (as declared in `CACHE_NAME = 'ledgerix-v2.11.5-shell'`; `APP_VERSION` in `app.config.js`, the `index.html` splash/sidebar/footer labels, the PIN-overlay label and the README title all read `v2.11.5`)
 - **Status:** Functional single-file app. Core invoice lifecycle is production-quality. Several secondary features are solid. A few areas are basic or still maturing.
 - **Verification status:** All critical/non-critical bugs from the latest audit cycle have been fixed and statically verified. Browser/device verification pass has not yet been performed.
 
@@ -470,7 +470,7 @@ At larger scale (multiple users, shared devices, multi-branch businesses), the c
 
 **Cache update behavior:** When a new version is deployed, the SW activates automatically (`skipWaiting`) but cached content is only replaced after the next page load. The page sends a `SKIP_WAITING` message on detecting a waiting SW, which forces immediate activation. A full page reload then fetches updated assets.
 
-**Known risk:** If `CACHE_NAME` (currently `ledgerix-v2.11.4-shell`) is not bumped on deploy, old cached JS may be served to returning users. Cache name must be updated in `sw.js` on every meaningful code deploy.
+**Known risk:** If `CACHE_NAME` (currently `ledgerix-v2.11.5-shell`) is not bumped on deploy, old cached JS may be served to returning users. Cache name must be updated in `sw.js` on every meaningful code deploy.
 
 ---
 
@@ -1038,6 +1038,12 @@ All three security-critical files (`security.js`, `storage.js`, `state.js`) were
 **Not fixed (documented):** a stale copy served by the hosting CDN edge for a few minutes after a deploy cannot be bypassed from the client — wait ~5 minutes after publishing before the first Android open.
 **Verification:** see Part 16 (v2.11.4 release gate).
 
+### [2026-10-17, v2.11.5] — Sample Placeholders No Longer Reveal Real Identities
+
+**Problem (seen on the Android screenshot):** the form placeholders used a real-sounding business name, a phone-number sample whose last five digits were filled in, and a GSTIN sample whose PAN part belongs to a real company.
+**Change (`index.html` placeholders only):** business name → `ABC Enterprises Pvt Ltd`; phone (My Business, Clients, invoice client) → `+91 98765 xxxxx`; GSTIN (My Business, Clients, invoice client incl. the "e.g." hint) → the neutral format example `22AAAAA0000A1Z5` (the same one the validation message uses). Email / bank / account / IFSC / UPI placeholders were already generic and were left as they are. These are placeholder attributes only — no stored data, validation or behaviour changed. Version/SW cache bumped to v2.11.5 because `index.html` is served cache-first.
+**Verification:** static package checks, existing 73-check regression, 47-row save matrix, SW upgrade v2.11.4→v2.11.5 (4 runs) and a placeholder scan in the extracted ZIP — see the release notes of this change; the encryption/OCR suites were not re-run (no JS logic changed).
+
 ## Full Live Feature Verification (v2.10, pre-fix)
 
 **Method:** Exhaustive code-path tracing of all JS modules, HTML structure, cross-module wiring, and DOM ID references. Every module's exports, imports, and bridge registrations were audited.
@@ -1499,5 +1505,5 @@ These could not be tested in the sandbox and genuinely require a real deployment
 
 **The application is functionally complete for small Indian business local billing.** All core features work. The HTML invoice preview and the Android PDF output are verified. Remaining real-device items are the PWA/offline/iOS/print/OCR/share/restore checks listed above (the PDF items in the list above were completed for Android in v2.11.1).
 
-**v2.11.4 — BROWSER (SANDBOX) VERIFIED; REAL-DEVICE VERIFICATION OF THE v2.11.2–v2.11.4 FIXES PENDING** (v2.11.1 PDF layout/money rendering remains real-Android verified)
+**v2.11.5 — BROWSER (SANDBOX) VERIFIED; REAL-DEVICE VERIFICATION OF THE v2.11.2–v2.11.5 FIXES PENDING** (v2.11.1 PDF layout/money rendering remains real-Android verified)
 

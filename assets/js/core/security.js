@@ -352,7 +352,7 @@ export function checkPIN() {
       overlay.innerHTML = `
         <div style="width:52px;height:52px;background:#c9a84c;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;color:#0a1628;font-family:'Playfair Display',serif">L</div>
         <h2 style="color:#c9a84c;font-family:'Playfair Display',serif;font-size:22px;margin:0">Ledgerix</h2>
-        <p style="color:#8892a8;font-size:13px;margin:0">v2.11.4 — Enter your PIN to continue</p>
+        <p style="color:#8892a8;font-size:13px;margin:0">v2.11.5 — Enter your PIN to continue</p>
         <input id="pinInput" type="password" maxlength="4" inputmode="numeric" pattern="[0-9]*"
           style="background:#1a2842;border:1px solid #c9a84c;color:#f0f0f0;padding:10px 20px;border-radius:6px;font-size:22px;text-align:center;letter-spacing:8px;width:180px;outline:none;font-family:monospace"
           placeholder="••••" autocomplete="off">
