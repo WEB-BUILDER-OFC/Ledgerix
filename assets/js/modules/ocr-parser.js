@@ -279,7 +279,7 @@ export function parseInvoiceOCR(input, opts = {}) {
     if (pick.repaired) flag('warn', 'gstin', 'GSTIN had OCR look-alike characters that were corrected — verify it.');
     if (gst.length > 1) flag('info', 'gstin', `${gst.length} GSTINs found; the seller's one was chosen.`);
   } else {
-    flag('info', 'gstin', 'No GSTIN found.');
+    flag('info', 'gstin', 'No GSTIN is printed on this bill, so the field is left blank — nothing was invented. Add it manually if the supplier has one.');
   }
 
   // ── Label → value resolution (value on the same line OR on the next line under the label) ──
@@ -299,6 +299,8 @@ export function parseInvoiceOCR(input, opts = {}) {
         labelToks.push({ lb: rawToks[k] === 'DUE' ? 'DUE' : 'DATE', x }); k++;
       } else labelToks.push({ lb: rawToks[k], x: rawW && rawW[k] ? (rawW[k].x0 + rawW[k].x1) / 2 : null });
     }
+    // other text can share the line (e.g. the invoice number floated to the right): ignore trailing non-label tokens
+    while (labelToks.length > 2 && !/^(DATE|DUE|STATUS)$/.test(labelToks[labelToks.length - 1].lb)) labelToks.pop();
     if (labelToks.length >= 2 && labelToks.length <= 5 && labelToks.every(w => /^(DATE|DUE|STATUS)$/.test(w.lb)) && lines[i + 1]) {
       const vl = lines[i + 1];
       const DRX = /^(\d{4}[-\/.]\d{1,2}[-\/.]\d{1,2}|\d{1,2}[-\/.]\d{1,2}[-\/.]\d{2,4})$/;
@@ -379,10 +381,13 @@ export function parseInvoiceOCR(input, opts = {}) {
   }
 
   const items = [];
+  const consumed = new Set();
   const scanFrom = hdrIdx >= 0 ? hdrIdx + 1 : 0;
   for (let i = scanFrom; i < totalsStart; i++) {
+    if (consumed.has(i)) continue;
     const l = lines[i];
     const row = _parseRow(l, cols, items.length + 1, hdrIdx >= 0);
+    if (row && !_rowReconciles(row)) _recoverWrappedQty(row, lines, i, scanFrom, totalsStart, consumed);
     if (row) { row.line = i; items.push(row); }
     else if (items.length && !/\d/.test(l.text) && l.text.length < 60 && i === items[items.length - 1].line + 1) {
       items[items.length - 1].desc = (items[items.length - 1].desc + ' ' + l.text).trim();   // wrapped description
@@ -394,20 +399,23 @@ export function parseInvoiceOCR(input, opts = {}) {
   // per-row validation
   items.forEach((it, n) => {
     it.flags = it.flags || [];
+    it.uncertain = it.uncertain || [];
+    const unsure = (...f) => f.forEach(x => { if (!it.uncertain.includes(x)) it.uncertain.push(x); });
     if (!it.desc || it.desc.replace(/[^A-Za-z]/g, '').length < 2) { it.flags.push('description unclear'); }
-    if (it.qty == null) { it.qty = 1; it.flags.push('quantity not found — 1 assumed'); }
+    if (it.qty == null) { it.qty = 1; it.flags.push('quantity not found — 1 assumed'); unsure('qty'); }
     if (it.rate == null && it.total != null && it.qty && !it.flags.some(f => /quantity not found/.test(f))) {
       const g = it.gst != null ? it.gst : defaultGST, d = it.disc || 0;
       it.rate = +((it.total / (1 + g / 100)) / (it.qty * (1 - d / 100))).toFixed(2);
-      it.flags.push('rate derived from total — verify');
+      it.flags.push('rate derived from total — verify'); unsure('rate');
     }
-    if (it.gst == null) { it.gst = defaultGST; it.flags.push(`GST % not on bill — ${defaultGST}% default applied`); }
+    if (it.gst == null) { it.gst = defaultGST; it.flags.push(`GST % not on bill — ${defaultGST}% default applied`); unsure('gst'); }
     else if (!KNOWN_GST.has(it.gst)) it.flags.push(`unusual GST rate ${it.gst}%`);
     if (it.disc == null) it.disc = 0;
-    if (it.rate == null) it.flags.push('rate not found');
+    if (it.rate == null) { it.flags.push('rate not found'); unsure('rate'); }
     if (it.rate != null && it.total != null && !_rowReconciles(it)) {
       const net = it.qty * it.rate * (1 - it.disc / 100);
       it.flags.push(`row does not add up (qty×rate gives ${net.toFixed(2)}, bill shows ${it.total.toFixed(2)})`);
+      unsure('qty', 'rate', 'gst');   // the figures on this row contradict each other — which one is wrong is unknown
     }
     if (it.flags.length) flag('warn', 'items', `Item ${n + 1} (${(it.desc || '?').slice(0, 24)}): ${it.flags.join('; ')}.`);
   });
@@ -628,6 +636,27 @@ function _tryLayout(layout, nums, strictHsn) {
   return best;
 }
 
+// A narrow PDF cell can wrap a long number ("1000" → "100" / "0"), which a text layer reports as an
+// extra line holding only the leftover digits. The leftover is appended to the quantity ONLY if the
+// row then adds up (qty × rate × (1−disc) × (1+GST) = total, tax column too) and did not before.
+function _recoverWrappedQty(row, lines, i, from, to, consumed) {
+  if (row.qty == null || !Number.isInteger(row.qty)) return false;
+  for (const j of [i + 1, i - 1]) {
+    if (j < from || j >= to || consumed.has(j)) continue;
+    const frag = lines[j].text.trim();
+    if (!/^\d{1,4}$/.test(frag)) continue;
+    const cand = Number(String(row.qty) + frag);
+    if (_rowReconciles({ ...row, qty: cand })) {
+      row.flags = row.flags.filter(f => !/figures do not reconcile/.test(f));   // no longer true after the recovery
+      row.flags.push(`quantity ${cand} reassembled from a wrapped cell ("${row.qty}" + "${frag}") — the row adds up only with this quantity; verify it`);
+      row.uncertain.push('qty');
+      row.qty = cand; consumed.add(j);
+      return true;
+    }
+  }
+  return false;
+}
+
 function _parseRow(line, cols, expectedSerial, hasHeader) {
   let tokens = line.words && line.words.length
     ? line.words.map(w => ({ t: String(w.text), x: (w.x0 + w.x1) / 2 }))
@@ -653,9 +682,10 @@ function _parseRow(line, cols, expectedSerial, hasHeader) {
   });
   const hdr = cols ? cols.map(c => (c.key === 'taxAmt' ? 'tax' : c.key)).filter(k => k !== 'desc') : null;
 
-  let best = null;
+  let best = null; const all = [];
   const consider = (layout, pri) => {
     const r = _tryLayout(layout, nums, !hdr);
+    if (r) all.push(r);
     if (r && (!best || r.score > best.score || (r.score === best.score && pri > best.pri))) best = { ...r, pri, layout };
   };
   if (hdr && hdr.length >= nums.length) consider(hdr.slice(hdr.length - nums.length), 1);
@@ -664,7 +694,14 @@ function _parseRow(line, cols, expectedSerial, hasHeader) {
   if (best.score < 60 && !(hasHeader && best.pri === 1)) return null;      // unreconciled rows only trusted with a real header
 
   const it = best.it;
-  const row = { desc, hsn: it.hsn || '', qty: it.qty, rate: it.rate, gst: it.gst, disc: it.disc, taxAmt: it.taxAmt, total: it.total, flags: [] };
+  const row = { desc, hsn: it.hsn || '', qty: it.qty, rate: it.rate, gst: it.gst, disc: it.disc, taxAmt: it.taxAmt, total: it.total, flags: [], uncertain: [] };
+  // Another column assignment that adds up EQUALLY well and gives different numbers = ambiguous text.
+  const sig = (x) => [x.qty, x.rate, x.gst, x.disc, x.total].join('|');
+  const rivals = best.score >= 60 ? all.filter(r => r.score === best.score && sig(r.it) !== sig(it)) : [];
+  if (rivals.length) {
+    row.flags.push(`columns are ambiguous — another reading also adds up (qty ${rivals[0].it.qty} × rate ${rivals[0].it.rate}, GST ${rivals[0].it.gst}%)`);
+    row.uncertain.push('qty', 'rate', 'gst');
+  }
   if (best.repairs.length) row.flags.push(`${best.repairs.join('/')} began with an extra digit (misread ₹) — corrected because the row only adds up that way`);
   if (best.score < 60) row.flags.push('columns taken from the header order; figures do not reconcile');
   if (best.taxIgnored) { row.taxAmt = null; row.flags.push('tax amount unreadable — ignored (it is recalculated from the GST %)'); }

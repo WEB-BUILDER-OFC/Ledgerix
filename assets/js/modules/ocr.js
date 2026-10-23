@@ -416,7 +416,7 @@ function _applyParsed(p) {
   State.setOcrDetectedBillNo(p.invoiceNo.value || '');
   State.setOcrDetectedItems(p.items.map(it => ({
     id: nextId(), desc: it.desc || '', hsn: it.hsn || '', qty: it.qty || 1, rate: it.rate || 0,
-    gst: it.gst != null ? it.gst : 18, disc: it.disc || 0, flags: it.flags || [],
+    gst: it.gst != null ? it.gst : 18, disc: it.disc || 0, flags: it.flags || [], uncertain: it.uncertain || [],
   })));
   _renderOCRResults();
 }
@@ -442,6 +442,7 @@ function _renderReview(p) {
   box.style.background = p.needsReview ? 'rgba(192,57,43,.08)' : 'rgba(39,174,96,.08)';
   box.style.border = '1px solid ' + (p.needsReview ? 'rgba(192,57,43,.35)' : 'rgba(39,174,96,.35)');
   const T = p.totals || {}, C = p.computed || {};
+  const discs = (p.items || []).filter(i => i.disc > 0).map(i => `${esc(i.desc || 'item')} ${i.disc}%`);
   const cmp = (T.grand != null || C.grand != null)
     ? `<div style="margin-top:.4rem;color:var(--c-text-mute)">Total on the bill: <b>${T.grand != null ? T.grand.toFixed(2) : 'not read'}</b> &nbsp;|&nbsp; Items + tax + charges: <b>${C.grand != null ? C.grand.toFixed(2) : 'n/a'}</b>${T.words != null ? ` &nbsp;|&nbsp; In words: <b>${T.words}</b>` : ''}</div>` : '';
   box.innerHTML =
@@ -449,6 +450,7 @@ function _renderReview(p) {
     (flags.length ? '<ul style="margin:.4rem 0 0 1.1rem;padding:0">' + flags.map(f =>
       `<li style="color:${colour[f.level]}"><i class="fas ${icon[f.level]}"></i> ${esc(f.message)}</li>`).join('') + '</ul>' : '') +
     cmp +
+    (discs.length ? `<div style="margin-top:.3rem;color:var(--c-text-mute)">Line discounts read from the bill (applied before GST, carried into the invoice): <b>${discs.join(', ')}</b></div>` : '') +
     (_lastRawText ? `<details style="margin-top:.5rem"><summary style="cursor:pointer">Show recognised text</summary><pre style="white-space:pre-wrap;font-size:.75rem;max-height:200px;overflow:auto;margin:.4rem 0 0">${esc(_lastRawText)}</pre></details>` : '');
 }
 
@@ -507,12 +509,13 @@ export function renderOCRItems() {
     tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--c-text-mute);padding:1rem">No items detected</td></tr>';
     return;
   }
+  const sure = (it, f) => (it.uncertain && it.uncertain.includes(f)) ? ';outline:2px solid #e67e22;outline-offset:-2px' : '';
   tbody.innerHTML = State.ocrDetectedItems.map((it, idx) => `
     <tr${it.flags && it.flags.length ? ` style="background:rgba(230,126,34,.12)" title="${esc(it.flags.join('; '))}"` : ''}>
       <td><input type="text"   value="${esc(it.desc)}"         onchange="window._ledgerix.ocr.updateOCRItem(${idx},'desc',this.value)"  placeholder="Product name"></td>
-      <td><input type="number" value="${esc(String(it.qty))}"  onchange="window._ledgerix.ocr.updateOCRItem(${idx},'qty',this.value)"   min="1" style="text-align:center"></td>
-      <td><input type="number" value="${esc(String(it.rate))}" onchange="window._ledgerix.ocr.updateOCRItem(${idx},'rate',this.value)"  min="0" style="text-align:right"></td>
-      <td><input type="number" value="${esc(String(it.gst))}"  onchange="window._ledgerix.ocr.updateOCRItem(${idx},'gst',this.value)"   min="0" max="28" style="text-align:center"></td>
+      <td><input type="number" value="${esc(String(it.qty))}"  onchange="window._ledgerix.ocr.updateOCRItem(${idx},'qty',this.value)"   min="1" style="text-align:center${sure(it, 'qty')}" ${sure(it, 'qty') ? 'title="Uncertain — check this against the bill"' : ''}></td>
+      <td><input type="number" value="${esc(String(it.rate))}" onchange="window._ledgerix.ocr.updateOCRItem(${idx},'rate',this.value)"  min="0" style="text-align:right${sure(it, 'rate')}" ${sure(it, 'rate') ? 'title="Uncertain — check this against the bill"' : ''}></td>
+      <td><input type="number" value="${esc(String(it.gst))}"  onchange="window._ledgerix.ocr.updateOCRItem(${idx},'gst',this.value)"   min="0" max="28" style="text-align:center${sure(it, 'gst')}" ${sure(it, 'gst') ? 'title="Uncertain — check this against the bill"' : ''}></td>
       <td><button class="btn btn-danger btn-sm" onclick="window._ledgerix.ocr.removeOCRItem(${idx})"><i class="fas fa-trash"></i></button></td>
     </tr>`).join('');
 }
@@ -537,6 +540,11 @@ export function updateOCRItem(idx, field, value) {
   State.ocrDetectedItems[idx][field] = ['qty','rate','gst','disc'].includes(field)
     ? parseFloat(value) || 0
     : value;
+  const it = State.ocrDetectedItems[idx];
+  if (it.uncertain && it.uncertain.includes(field)) {          // the user has looked at this cell and set it
+    it.uncertain = it.uncertain.filter(f => f !== field);
+    renderOCRItems();
+  }
   updateOCRCalculations();
 }
 
@@ -561,8 +569,16 @@ export function createInvoiceFromOCR() {
     return;
   }
   // Explicit confirmation whenever the scan is uncertain or conflicting
-  if (_lastParse && _lastParse.needsReview) {
-    const lines = _lastParse.flags.filter(f => f.level !== 'info').slice(0, 6).map(f => '• ' + f.message).join('\n');
+  const anyUncertain = State.ocrDetectedItems.some(it => it.uncertain && it.uncertain.length);
+  if (_lastParse && (_lastParse.needsReview || anyUncertain)) {
+    let lines = _lastParse.flags.filter(f => f.level !== 'info').slice(0, 6).map(f => '• ' + f.message).join('\n');
+    const T = _lastParse.totals || {};
+    let sub = 0, gst = 0;
+    State.ocrDetectedItems.forEach(it => { const a = it.qty * it.rate * (1 - (it.disc || 0) / 100); sub += a; gst += a * (it.gst / 100); });
+    const ex = _lastParse.extras ? (_lastParse.extras.shipping + _lastParse.extras.packaging + _lastParse.extras.handling) : 0;
+    if (T.grand != null && Math.abs(T.grand - (sub + gst + ex)) > 1.01) {
+      lines += `\n• Total on the bill ${T.grand.toFixed(2)} ≠ items + tax + charges ${(sub + gst + ex).toFixed(2)}`;
+    }
     if (!confirm('Some scanned details are uncertain or conflict:\n\n' + lines +
                  '\n\nCreate the invoice from these details anyway? Nothing is saved yet — you can edit everything afterwards.')) return;
   }
@@ -589,7 +605,7 @@ export function createInvoiceFromOCR() {
       });
     }
 
-    State.setItems(State.ocrDetectedItems.map(({ flags, ...it }) => ({ ...it, id: nextId() })));
+    State.setItems(State.ocrDetectedItems.map(({ flags, uncertain, ...it }) => ({ ...it, id: nextId() })));
     import('./invoice.js').then(m => {
       m.renderItems();
       showToast('Invoice form filled from the scan — review it, then press Save.', 'success');

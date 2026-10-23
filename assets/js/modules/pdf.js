@@ -377,9 +377,15 @@ export async function downloadPDFFromData(data) {
       ];
     });
 
-    const MONEY_COLS     = [4, 7, 8];                 // Rate, Tax Amt, Total
     const MONEY_PAD      = { top: 3, bottom: 3, left: 2, right: 2 };
     const MONEY_USABLE_W = 22 - MONEY_PAD.left - MONEY_PAD.right;
+    // Qty: 10 mm with 3 mm padding left only 4.0 mm of text width — "100" (3.8 mm) fitted but "1000"
+    // (5.1 mm) was split by autoTable into "100" / "0" (reproduced from a real generated PDF).
+    // 13 mm with 1.5 mm padding = 10.0 mm usable (7 digits at 7 pt); the fit hook below covers more.
+    const QTY_W          = 13;
+    const QTY_PAD        = { top: 3, bottom: 3, left: 1.5, right: 1.5 };
+    const QTY_USABLE_W   = QTY_W - QTY_PAD.left - QTY_PAD.right;
+    const FIT_USABLE_W   = { 3: QTY_USABLE_W, 4: MONEY_USABLE_W, 7: MONEY_USABLE_W, 8: MONEY_USABLE_W };
 
     doc.autoTable({
       startY: y,
@@ -396,7 +402,7 @@ export async function downloadPDFFromData(data) {
         0: { cellWidth: 8 },
         1: { cellWidth: 47 },
         2: { cellWidth: 18 },
-        3: { cellWidth: 10, halign: 'center' },
+        3: { cellWidth: QTY_W, halign: 'center', cellPadding: QTY_PAD },
         4: { cellWidth: 22, halign: 'right', cellPadding: MONEY_PAD },
         5: { cellWidth: 14, halign: 'center' },
         6: { cellWidth: 14, halign: 'center' },
@@ -404,16 +410,17 @@ export async function downloadPDFFromData(data) {
         8: { cellWidth: 22, halign: 'right', cellPadding: MONEY_PAD },
       },
       margin: { left: margin, right: margin },
-      // Money cells ("Rs. 1,039,500.00") can be wider than a fixed 22 mm column.
+      // Money cells ("Rs. 1,039,500.00") and Qty can be wider than their fixed columns.
       // Shrink only that cell's font so it fits on one line (no wrap, no spill).
       didParseCell: (h) => {
-        if (h.section !== 'body' || !MONEY_COLS.includes(h.column.index)) return;
+        const usableW = FIT_USABLE_W[h.column.index];
+        if (h.section !== 'body' || !usableW) return;
         const txt = (h.cell.text || []).join('');
         if (!txt) return;
         let size = 7;
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(size);
-        while (size > 5 && doc.getTextWidth(txt) > MONEY_USABLE_W) {
+        while (size > 5 && doc.getTextWidth(txt) > usableW) {
           size -= 0.25;
           doc.setFontSize(size);
         }

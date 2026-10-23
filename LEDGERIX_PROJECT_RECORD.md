@@ -1,6 +1,6 @@
 # LEDGERIX — PROJECT RECORD
 **Single source of permanent memory and honest audit for the Ledgerix web application.**
-Last updated: 2026-10-17 | Build: v2.11.5
+Last updated: 2026-10-18 | Build: v2.11.6
 
 ---
 
@@ -16,7 +16,7 @@ It solves the problem of affordable, offline-capable GST invoice generation for 
 
 ## Current Version
 
-- **App version:** `v2.11.5` (as declared in `CACHE_NAME = 'ledgerix-v2.11.5-shell'`; `APP_VERSION` in `app.config.js`, the `index.html` splash/sidebar/footer labels, the PIN-overlay label and the README title all read `v2.11.5`)
+- **App version:** `v2.11.6` (as declared in `CACHE_NAME = 'ledgerix-v2.11.6-shell'`; `APP_VERSION` in `app.config.js`, the `index.html` splash/sidebar/footer labels, the PIN-overlay label and the README title all read `v2.11.6`)
 - **Status:** Functional single-file app. Core invoice lifecycle is production-quality. Several secondary features are solid. A few areas are basic or still maturing.
 - **Verification status:** All critical/non-critical bugs from the latest audit cycle have been fixed and statically verified. Browser/device verification pass has not yet been performed.
 
@@ -470,7 +470,7 @@ At larger scale (multiple users, shared devices, multi-branch businesses), the c
 
 **Cache update behavior:** When a new version is deployed, the SW activates automatically (`skipWaiting`) but cached content is only replaced after the next page load. The page sends a `SKIP_WAITING` message on detecting a waiting SW, which forces immediate activation. A full page reload then fetches updated assets.
 
-**Known risk:** If `CACHE_NAME` (currently `ledgerix-v2.11.5-shell`) is not bumped on deploy, old cached JS may be served to returning users. Cache name must be updated in `sw.js` on every meaningful code deploy.
+**Known risk:** If `CACHE_NAME` (currently `ledgerix-v2.11.6-shell`) is not bumped on deploy, old cached JS may be served to returning users. Cache name must be updated in `sw.js` on every meaningful code deploy.
 
 ---
 
@@ -1044,6 +1044,17 @@ All three security-critical files (`security.js`, `storage.js`, `state.js`) were
 **Change (`index.html` placeholders only):** business name → `ABC Enterprises Pvt Ltd`; phone (My Business, Clients, invoice client) → `+91 98765 xxxxx`; GSTIN (My Business, Clients, invoice client incl. the "e.g." hint) → the neutral format example `22AAAAA0000A1Z5` (the same one the validation message uses). Email / bank / account / IFSC / UPI placeholders were already generic and were left as they are. These are placeholder attributes only — no stored data, validation or behaviour changed. Version/SW cache bumped to v2.11.5 because `index.html` is served cache-first.
 **Verification:** static package checks, existing 73-check regression, 47-row save matrix, SW upgrade v2.11.4→v2.11.5 (4 runs) and a placeholder scan in the extracted ZIP — see the release notes of this change; the encryption/OCR suites were not re-run (no JS logic changed).
 
+### [2026-10-18, v2.11.6] — PDF Quantity Wrapped ("1000" → "100"/"0") and the OCR Result It Caused
+
+**Reproduction (real jsPDF PDF from the Android device + the scanner screenshot):** the invoice's Qty is **1000**, not 100 — 1000 × Rs. 10,000 × (1 − 10 %) = Rs. 9,000,000 = the printed Subtotal (5 % GST = 450,000; + 3 × 50 charges = 9,450,150 = Grand Total = amount in words). The Qty column was 10 mm wide with 3 mm padding each side (4.0 mm of text width); "100" (3.8 mm) fitted, "1000" (5.1 mm) was split by autoTable into "100" / "0" (measured in the real PDF: the second line sits 2.84 mm lower). **Every quantity ≥ 1000 wrapped.** (The reported "quantity 100" was the first half of the wrapped cell.)
+**Scanner root cause:** the PDF text layer therefore contained `… 0012 100 Rs. 10,000.00 5% 10% Rs. 450,000.00 Rs. 9,450,000.00` followed by a separate line `0`. The parser read qty 100 and ignored the orphan; 100 × 10,000 × 0.9 × 1.05 = 945,000 ≠ 9,450,000, so it correctly flagged "row does not add up" and "subtotal differs from items" — but left the wrong quantity in the form. **The discount was NOT missed:** the scanner's 900,000 already contained the 10 %. Calculation order confirmed in `invoice.js`: amount = qty × rate × (1 − disc/100); GST on the discounted amount; Subtotal = sum of discounted amounts (excludes tax); grand = subtotal + GST + shipping + packaging + handling. "No GSTIN found" was correct — the PDF prints none (nothing is invented; the message now says so).
+**Fix 1 — PDF (`pdf.js`, table only):** Qty column 10 → 13 mm with 1.5 mm side padding (10.0 mm usable = 7 digits at 7 pt), taken from the 5 mm the table left unused (table 177 → 180 mm; right edge 191 → 194 mm, inside the 196 mm margin); the existing fit hook (money columns) now also shrinks a Qty cell's font (never below 5 pt) so it stays on one line. No other column, the totals panel, `Rs.` formatting, header/footer, logo or the "L" signature code changed.
+**Fix 2 — scanner (`ocr-parser.js`, `ocr.js`):** (a) `_recoverWrappedQty`: a leftover digit-only line next to a row that does NOT add up is appended to the quantity ONLY if the row then reconciles exactly (qty × rate × (1−disc) × (1+GST) = total, and the tax column) — disclosed, the cell is highlighted, the usual review/confirm applies; a fragment that does not reconcile is never merged; (b) per-row `uncertain` cells (qty/rate/GST) are highlighted in the review table when a row's figures contradict each other, are ambiguous, or were reconstructed — editing a cell clears its highlight; (c) two column readings that both add up but give different numbers are flagged as ambiguous, not silently chosen; (d) the review panel lists the line discounts that will be carried over and the confirmation before "Create Invoice" now also states "bill total ≠ items + tax + charges"; (e) the date-label row tolerates other text on the same line; (f) the missing-GSTIN message explains the field is left blank. Create still only fills the form; nothing is saved until the user presses Save.
+**Issue 3 (image/signature):** measured in the user's real PDF — logo 512 px placed at 24 mm = 542 dpi; signature "L" 378 px at 16 mm = 600 dpi; both exactly square (aspect 1.000, no stretching). No defect reproducible → image and signature code left unchanged (the "L" signature is intentional and was not touched).
+**Process note:** the sandbox's working files were reset mid-task; the tree was rebuilt from the shipped v2.11.5 ZIP, all changes re-applied and ALL suites re-created and re-run against the final package.
+**Not verified on a device:** real jsPDF/autoTable output with the new column (CDN blocked in the sandbox). Layout verified with the app's real table code, real Helvetica metrics and a wrap emulation calibrated to reproduce the real PDF ("100" one line, "1000" → "100"+"0"), and the new build is tested under the strictest rule. Android: pending.
+**Verification:** see Part 16 (v2.11.6).
+
 ## Full Live Feature Verification (v2.10, pre-fix)
 
 **Method:** Exhaustive code-path tracing of all JS modules, HTML structure, cross-module wiring, and DOM ID references. Every module's exports, imports, and bridge registrations were audited.
@@ -1238,6 +1249,20 @@ All suites were re-run against the EXTRACTED release ZIP (Chromium sandbox; CDNs
 **Service-worker upgrade test (real Chromium, SW enabled, prior build installed, candidate "deployed", then reload):** v2.11.2→v2.11.4 and v2.11.3→v2.11.4, each with `no-cache` and `max-age=600` headers = 4 × 9/9 PASS (page auto-reloads to the new version, old caches removed, every cached shell file byte-identical to the deployed file, existing encrypted data intact, saving works). The same test on v2.11.3 with `max-age=600` FAILED (stale index.html/app.config.js/storage.js/security.js pinned under the new cache name) — the reason v2.11.4 exists.
 **Measured, not changed:** OCR pre-processing 0.9–1.1 s and +180–280 MB browser memory on typical images (+500 MB for a 48 MP photo) on desktop Chromium — watch for tab reloads on low-RAM phones with very large photos.
 **Not testable here (needs the Android phone):** installed-PWA cold start, real jsPDF/autoTable output, real tesseract.js 4.1.1 and pdf.js CDN downloads, Android download behaviour, PIN keyboard flow on a phone.
+
+---
+
+## v2.11.6 Verification (2026-10-18)
+
+All suites were re-run against the EXTRACTED release ZIP (Chromium sandbox; CDNs blocked; native Tesseract 5.3.4 behind a tesseract.js-shaped stub; pdf.js served locally under its CDN URL; the user's real jsPDF-generated invoice PDF used as a fixture):
+- Package/static checks — all OK (33 files, 26 JS modules parse, all imports and SHELL_ASSETS resolve, icons 192/512 valid, versions v2.11.6, one record, no stray files, placeholders clean, fail-closed encryption + PDF fixes intact).
+- Feature regression **73/73**; save/persistence matrix **47/47**; legacy data **15/15**; encryption fail-closed **74/74**; handler bridge audit **60/60 defined**.
+- OCR fixtures **45/45** (27 earlier + 18 new: the user's real PDF, wrapped quantities 1000 and 25000, unresolved mismatch, reordered columns with IGST, missing GSTIN); review → Create → explicit Save **19/19**; parser unit **58/58** (Indian/Western/lakh/crore formats, Rs./INR/₹, wrapped-quantity recovery before/after the row, rejected fragment, ambiguity, missing GSTIN, discount order).
+- PDF quantity **12/12** (app's real table code + real Helvetica metrics + wrap emulation calibrated on the real PDF; new build tested with the strictest rule): 19 quantities from 1 to 1,234,567,890 incl. decimals on one line; only the Qty column changed; table inside the margins; money columns and long descriptions unaffected.
+- Service-worker upgrade v2.11.5 → v2.11.6 (real SW; `no-cache` and `max-age=600`): 2 × 9/9.
+- Negative control: v2.11.5 reads the user's PDF as quantity 100 with a subtotal error — the new tests fail there.
+- Issue 3: `pdf.js` differs from v2.11.5 only in the Qty/fit-hook hunks (the single keyword hit in the diff is a code comment); the real PDF's logo (542 dpi) and signature (600 dpi) are exact squares.
+**Not testable here / pending on the Android phone:** real jsPDF/autoTable output with the 13 mm Qty column (generate an invoice with quantity 1000), real tesseract.js 4.1.1 and pdf.js CDN downloads, installed-PWA behaviour. Automated success is NOT a substitute for the device check.
 
 ---
 
@@ -1505,5 +1530,5 @@ These could not be tested in the sandbox and genuinely require a real deployment
 
 **The application is functionally complete for small Indian business local billing.** All core features work. The HTML invoice preview and the Android PDF output are verified. Remaining real-device items are the PWA/offline/iOS/print/OCR/share/restore checks listed above (the PDF items in the list above were completed for Android in v2.11.1).
 
-**v2.11.5 — BROWSER (SANDBOX) VERIFIED; REAL-DEVICE VERIFICATION OF THE v2.11.2–v2.11.5 FIXES PENDING** (v2.11.1 PDF layout/money rendering remains real-Android verified)
+**v2.11.6 — BROWSER (SANDBOX) VERIFIED; REAL-DEVICE VERIFICATION OF THE v2.11.2–v2.11.6 FIXES PENDING** (v2.11.1 PDF layout/money rendering remains real-Android verified)
 
