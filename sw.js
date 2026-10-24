@@ -21,8 +21,8 @@ self.addEventListener('message', event => {
 
 'use strict';
 
-const CACHE_NAME     = 'ledgerix-v2.11.6-shell';
-const CDN_CACHE_NAME = 'ledgerix-v2.11.6-cdn';
+const CACHE_NAME     = 'ledgerix-v2.11.6-brand1-shell';
+const CDN_CACHE_NAME = 'ledgerix-v2.11.6-brand1-cdn';
 
 // App shell — served from cache first
 const SHELL_ASSETS = [
@@ -30,6 +30,8 @@ const SHELL_ASSETS = [
   './index.html',
   './manifest.json',
   './assets/css/main.css',
+  './assets/img/brand/ledgerix-emblem.png',
+  './assets/img/brand/ledgerix-splash.png',
   './assets/js/app.js',
   './config/app.config.js',
   './assets/js/core/state.js',
